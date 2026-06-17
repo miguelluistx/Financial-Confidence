@@ -1264,9 +1264,8 @@ export default function Home() {
       ? runFinancialCalculation(checkingBalanceAmount, unifiedTimelineEvents)
       : null;
 
-  const financialTimeline = hasDashboardData ? financialCalculation : null;
-  const effectiveSafeToSpend = financialTimeline?.safeToSpend ?? 0;
-  const cashShortfallDetected = financialTimeline?.hasShortfall ?? false;
+  const effectiveSafeToSpend = financialCalculation?.safeToSpend ?? 0;
+  const cashShortfallDetected = financialCalculation?.hasShortfall ?? false;
   const cashFlowProjection = financialCalculation;
 
   useEffect(() => {
@@ -1746,7 +1745,7 @@ export default function Home() {
     cashShortfallDetected,
     financialCalculation?.rows,
     todayISO,
-    financialTimeline?.shortfallCause ?? null,
+    financialCalculation?.shortfallCause ?? null,
   );
   const dashboardCashFlowLabel = dashboardCashFlow.status;
   const dashboardCashFlowSubtitle = dashboardCashFlow.subtitle;
