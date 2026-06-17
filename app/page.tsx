@@ -3,13 +3,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-type ConfidenceStatus = "Danger" | "Low" | "Good" | "Excellent";
-
-type ConfidenceScore = {
-  score: number;
-  status: ConfidenceStatus;
-};
-
 type PlannedBill = {
   id: string;
   name: string;
@@ -19,7 +12,11 @@ type PlannedBill = {
 
 type RecurringFrequency = "Monthly" | "Weekly" | "Biweekly";
 
-type SpendingVerdict = "Affordable Now" | "Wait Until Payday" | "Not Affordable";
+type SpendingVerdict =
+  | "Affordable Now"
+  | "Wait Until Payday"
+  | "Not Affordable Today"
+  | "Not Affordable";
 
 type PurchaseType =
   | "One-Time Purchase"
@@ -34,6 +31,7 @@ type SpendingDecisionResult = {
   monthlyImpact: number;
   purchaseCost: number;
   currentSafeToSpend: number;
+  availableByPurchaseDate: number;
   remainingSafeToSpend: number;
   projectedBalance: number;
   projectedShortfall: number | null;
@@ -100,9 +98,72 @@ function getVerdictDisplayLabel(verdict: SpendingVerdict): string {
       return "✅ AFFORDABLE NOW";
     case "Wait Until Payday":
       return "🟡 WAIT UNTIL PAYDAY";
+    case "Not Affordable Today":
+      return "🔴 NOT AFFORDABLE TODAY";
     case "Not Affordable":
       return "❌ NOT AFFORDABLE";
   }
+}
+
+function getBalanceBeforeDate(
+  checkingBalance: number,
+  events: TimelineEvent[],
+  targetDate: string,
+): number {
+  let balance = checkingBalance;
+
+  for (const event of sortTimelineEvents(events)) {
+    if (event.date >= targetDate) break;
+
+    if (event.type === "Expense") {
+      balance -= event.amount;
+    } else {
+      balance += event.amount;
+    }
+  }
+
+  return Math.round(balance * 100) / 100;
+}
+
+function getFinancialProjectionBeforeNextIncome(
+  checkingBalance: number,
+  events: TimelineEvent[],
+  extraEvents: TimelineEvent[] = [],
+  fromDate?: string,
+): { hasShortfall: boolean; lowestBalance: number } {
+  const sorted = sortTimelineEvents([...events, ...extraEvents]);
+  const startDate = fromDate ?? toISODate(new Date());
+
+  let runningBalance = checkingBalance;
+  let lowestBalance = runningBalance;
+  let hasShortfall = false;
+
+  for (const event of sorted) {
+    if (event.date < startDate) {
+      if (event.type === "Expense") {
+        runningBalance -= event.amount;
+      } else {
+        runningBalance += event.amount;
+      }
+      continue;
+    }
+
+    if (event.type === "Income") {
+      break;
+    }
+
+    if (runningBalance < event.amount) {
+      hasShortfall = true;
+    }
+
+    runningBalance -= event.amount;
+    lowestBalance = Math.min(lowestBalance, runningBalance);
+  }
+
+  return {
+    hasShortfall: hasShortfall || lowestBalance < 0,
+    lowestBalance: Math.round(lowestBalance * 100) / 100,
+  };
 }
 
 function projectFutureBalance(
@@ -146,34 +207,69 @@ function evaluateSpendingDecision(
   const evaluationDate = usedTodayForAnalysisOnly
     ? toISODate(new Date())
     : purchaseDateInput.trim();
-  const simulation = projectFutureBalance(
+  const todayISO = toISODate(new Date());
+  const isPurchaseToday = evaluationDate === todayISO;
+  const purchaseEvent: TimelineEvent = {
+    id: "simulated-purchase",
+    name: purchaseName.trim() || "Simulated Purchase",
+    amount: purchaseCost,
+    date: evaluationDate,
+    type: "Expense",
+  };
+  const beforeNextIncome = getFinancialProjectionBeforeNextIncome(
     checkingBalance,
     timelineEvents,
-    purchaseCost,
+    [purchaseEvent],
     evaluationDate,
   );
-  const projectedBalance = simulation.endingBalance;
+  const fullSimulation = runFinancialCalculation(
+    checkingBalance,
+    timelineEvents,
+    [purchaseEvent],
+  );
+  const projectedBalance = fullSimulation.endingBalance;
+  const balanceAvailableForPurchase = isPurchaseToday
+    ? checkingBalance
+    : getBalanceBeforeDate(checkingBalance, timelineEvents, evaluationDate);
+  const canCoverPurchaseToday = balanceAvailableForPurchase >= purchaseCost;
+  const safeBeforeNextPaycheck =
+    !beforeNextIncome.hasShortfall && beforeNextIncome.lowestBalance >= 0;
+  const shortBy =
+    Math.round(Math.max(0, purchaseCost - balanceAvailableForPurchase) * 100) /
+    100;
+  const nextIncomeDate = getNextIncomeDate(timelineEvents, evaluationDate);
+  const isBeforeNextPaycheck =
+    nextIncomeDate !== null && evaluationDate <= nextIncomeDate;
 
   let verdict: SpendingVerdict;
   let explanation: string;
   let projectedShortfall: number | null = null;
   let remainingSafeToSpend: number;
 
-  if (purchaseCost <= safeToSpend) {
+  if (isPurchaseToday && purchaseCost > checkingBalance) {
+    verdict = "Not Affordable Today";
+    remainingSafeToSpend = 0;
+    projectedShortfall = Math.abs(Math.min(0, beforeNextIncome.lowestBalance));
+    explanation = `You're short by $${shortBy} for this purchase.\n\nBuying this today would create a shortfall before your next paycheck.`;
+  } else if (canCoverPurchaseToday && safeBeforeNextPaycheck) {
     verdict = "Affordable Now";
     remainingSafeToSpend = Math.max(0, safeToSpend - purchaseCost);
     explanation =
-      "This purchase fits within your current Safe To Spend amount and does not create a cash flow risk.";
-  } else if (!simulation.hasShortfall && projectedBalance >= 0) {
+      "This purchase fits your cash flow and keeps your balance above $0.";
+  } else if (!fullSimulation.hasShortfall && projectedBalance >= 0) {
     verdict = "Wait Until Payday";
     remainingSafeToSpend = projectedBalance;
-    explanation = `You cannot safely buy this today because your available cash is currently $${checkingBalance}.\n\nHowever, after your upcoming paycheck(s) and required bills, you would still have approximately $${projectedBalance} remaining.\n\nWaiting until payday is recommended.`;
+    explanation = `You're short by $${shortBy} for this purchase.\n\nAfter your upcoming paycheck and bills, you would have about $${projectedBalance} left. Waiting until payday is recommended.`;
   } else {
     verdict = "Not Affordable";
-    projectedShortfall = Math.abs(Math.min(0, simulation.lowestBalance));
+    projectedShortfall = Math.abs(Math.min(0, fullSimulation.lowestBalance));
     remainingSafeToSpend = 0;
-    explanation =
-      "Even after upcoming income, this purchase would create a cash shortfall and should be avoided for now.";
+    const timelineShort = projectedShortfall ?? shortBy;
+    if (isBeforeNextPaycheck) {
+      explanation = `You're short by $${shortBy} for this purchase.\n\nBuying this today would create a shortfall before your next paycheck.`;
+    } else {
+      explanation = `You're short by $${shortBy} for this purchase.\n\nEven after upcoming income, this purchase is still $${timelineShort} short.`;
+    }
   }
 
   return {
@@ -184,6 +280,7 @@ function evaluateSpendingDecision(
     monthlyImpact: purchaseCost,
     purchaseCost,
     currentSafeToSpend: safeToSpend,
+    availableByPurchaseDate: balanceAvailableForPurchase,
     remainingSafeToSpend,
     projectedBalance,
     projectedShortfall,
@@ -215,6 +312,7 @@ function normalizeSpendingDecisionResult(
   switch (result.verdict) {
     case "Affordable Now":
     case "Wait Until Payday":
+    case "Not Affordable Today":
     case "Not Affordable":
       verdict = result.verdict;
       break;
@@ -254,6 +352,8 @@ function normalizeSpendingDecisionResult(
     purchaseCost:
       result.purchaseCost ?? result.monthlyImpact ?? result.cost,
     currentSafeToSpend: result.currentSafeToSpend ?? 0,
+    availableByPurchaseDate:
+      result.availableByPurchaseDate ?? result.currentSafeToSpend ?? 0,
     remainingSafeToSpend: result.remainingSafeToSpend,
     projectedBalance: result.projectedBalance ?? result.remainingSafeToSpend,
     projectedShortfall: result.projectedShortfall ?? null,
@@ -297,6 +397,8 @@ type TimelineEvent = {
 
 type CashFlowStatus = "risk" | "low" | "healthy";
 
+type ShortfallCause = "purchase" | "bill_before_paycheck" | null;
+
 type FinancialTimelineResult = {
   startingBalance: number;
   lowestBalance: number;
@@ -304,6 +406,7 @@ type FinancialTimelineResult = {
   endingBalance: number;
   safeToSpend: number;
   hasShortfall: boolean;
+  shortfallCause: ShortfallCause;
   status: CashFlowStatus;
   rows: { event: TimelineEvent; runningBalance: number }[];
 };
@@ -314,20 +417,39 @@ function runFinancialCalculation(
   extraEvents: TimelineEvent[] = [],
 ): FinancialTimelineResult {
   const sorted = sortTimelineEvents([...events, ...extraEvents]);
+  const todayISO = toISODate(new Date());
 
   let runningBalance = checkingBalance;
   let hasShortfall = false;
+  let shortfallCause: ShortfallCause = null;
   let lowestAfterEvents = Number.POSITIVE_INFINITY;
+  let lowestBeforeNextPaycheck = checkingBalance;
+  let trackingBeforeNextPaycheck = true;
   const rows: FinancialTimelineResult["rows"] = [];
 
   for (const event of sorted) {
     if (event.type === "Expense") {
       if (runningBalance < event.amount) {
         hasShortfall = true;
+        if (!shortfallCause) {
+          shortfallCause = isPlannedPurchaseEvent(event.id)
+            ? "purchase"
+            : "bill_before_paycheck";
+        }
       }
       runningBalance -= event.amount;
     } else {
+      if (event.date >= todayISO && trackingBeforeNextPaycheck) {
+        trackingBeforeNextPaycheck = false;
+      }
       runningBalance += event.amount;
+    }
+
+    if (trackingBeforeNextPaycheck && event.date >= todayISO) {
+      lowestBeforeNextPaycheck = Math.min(
+        lowestBeforeNextPaycheck,
+        runningBalance,
+      );
     }
 
     lowestAfterEvents = Math.min(lowestAfterEvents, runningBalance);
@@ -340,15 +462,18 @@ function runFinancialCalculation(
 
   const endingBalance = Math.round(runningBalance * 100) / 100;
   const lowestBalance = Math.round(lowestAfterEvents * 100) / 100;
+  const lowestBalanceBeforeNextPaycheck =
+    Math.round(lowestBeforeNextPaycheck * 100) / 100;
 
   if (hasShortfall || lowestBalance < 0) {
     return {
       startingBalance: checkingBalance,
       lowestBalance,
-      lowestBalanceBeforeNextPaycheck: lowestBalance,
+      lowestBalanceBeforeNextPaycheck,
       endingBalance,
       safeToSpend: 0,
       hasShortfall: true,
+      shortfallCause,
       status: "risk",
       rows,
     };
@@ -359,10 +484,11 @@ function runFinancialCalculation(
   return {
     startingBalance: checkingBalance,
     lowestBalance,
-    lowestBalanceBeforeNextPaycheck: lowestBalance,
+    lowestBalanceBeforeNextPaycheck,
     endingBalance,
     safeToSpend,
     hasShortfall: false,
+    shortfallCause: null,
     status: getCashFlowStatus(safeToSpend),
     rows,
   };
@@ -567,6 +693,92 @@ function formatDueDate(dateString: string): string {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+function getNextIncomeDate(
+  events: TimelineEvent[],
+  fromDate: string,
+): string | null {
+  for (const event of sortTimelineEvents(events)) {
+    if (event.type === "Income" && event.date >= fromDate) {
+      return event.date;
+    }
+  }
+
+  return null;
+}
+
+function getShortfallExpenseEvents(
+  rows: FinancialTimelineResult["rows"] | undefined,
+  todayISO: string,
+): TimelineEvent[] {
+  if (!rows?.length) return [];
+
+  const problematic: TimelineEvent[] = [];
+
+  for (const { event, runningBalance } of rows) {
+    if (event.date < todayISO) continue;
+
+    if (event.type === "Income") {
+      break;
+    }
+
+    if (event.type === "Expense") {
+      const balanceBefore = runningBalance + event.amount;
+      if (balanceBefore < event.amount) {
+        problematic.push(event);
+      }
+    }
+  }
+
+  return problematic;
+}
+
+function getDashboardCashFlowSubtitle(
+  rows: FinancialTimelineResult["rows"] | undefined,
+  todayISO: string,
+  shortfallCause: ShortfallCause,
+): string {
+  const problematicEvents = getShortfallExpenseEvents(rows, todayISO);
+
+  if (problematicEvents.length > 1) {
+    return "Multiple expenses exceed cash";
+  }
+
+  if (problematicEvents.length === 1) {
+    if (isPlannedPurchaseEvent(problematicEvents[0].id)) {
+      return "Purchase exceeds available cash";
+    }
+
+    return "Upcoming bill creates shortage";
+  }
+
+  if (shortfallCause === "purchase") {
+    return "Purchase exceeds available cash";
+  }
+
+  return "Upcoming bill creates shortage";
+}
+
+function getDashboardCashFlowMessage(
+  hasShortfall: boolean,
+  rows: FinancialTimelineResult["rows"] | undefined,
+  todayISO: string,
+  shortfallCause: ShortfallCause,
+): { status: "Healthy" | "Shortfall Expected"; message: string; subtitle: string } {
+  if (!hasShortfall) {
+    return {
+      status: "Healthy",
+      message: "✅ Cash flow is healthy through upcoming bills and income.",
+      subtitle: "Cash flow remains positive",
+    };
+  }
+
+  return {
+    status: "Shortfall Expected",
+    message: "⚠️ Remove or reduce planned purchases to avoid a cash shortfall.",
+    subtitle: getDashboardCashFlowSubtitle(rows, todayISO, shortfallCause),
+  };
+}
+
 const cashFlowStatusStyles: Record<
   CashFlowStatus,
   { border: string; bg: string; badge: string; badgeText: string; message: string }
@@ -661,89 +873,6 @@ function savePersistedData(data: PersistedAppData): void {
   }
 }
 
-const statusStyles: Record<
-  ConfidenceStatus,
-  {
-    border: string;
-    bg: string;
-    badge: string;
-    badgeText: string;
-    score: string;
-    label: string;
-    bar: string;
-    ring: string;
-  }
-> = {
-  Excellent: {
-    border: "border-emerald-500/30",
-    bg: "bg-emerald-500/10",
-    badge: "bg-emerald-500/20",
-    badgeText: "text-emerald-300",
-    score: "text-emerald-100",
-    label: "text-emerald-400",
-    bar: "bg-emerald-400",
-    ring: "stroke-emerald-400",
-  },
-  Good: {
-    border: "border-blue-500/30",
-    bg: "bg-blue-500/10",
-    badge: "bg-blue-500/20",
-    badgeText: "text-blue-300",
-    score: "text-blue-100",
-    label: "text-blue-400",
-    bar: "bg-blue-400",
-    ring: "stroke-blue-400",
-  },
-  Low: {
-    border: "border-yellow-500/30",
-    bg: "bg-yellow-500/10",
-    badge: "bg-yellow-500/20",
-    badgeText: "text-yellow-300",
-    score: "text-yellow-100",
-    label: "text-yellow-400",
-    bar: "bg-yellow-400",
-    ring: "stroke-yellow-400",
-  },
-  Danger: {
-    border: "border-red-500/30",
-    bg: "bg-red-500/10",
-    badge: "bg-red-500/20",
-    badgeText: "text-red-300",
-    score: "text-red-100",
-    label: "text-red-400",
-    bar: "bg-red-400",
-    ring: "stroke-red-400",
-  },
-};
-
-function getConfidenceScore(safeToSpend: number): ConfidenceScore {
-  if (safeToSpend < 0) {
-    return { score: 0, status: "Danger" };
-  }
-  if (safeToSpend <= 500) {
-    return { score: 50, status: "Low" };
-  }
-  if (safeToSpend <= 1500) {
-    return { score: 75, status: "Good" };
-  }
-  if (safeToSpend <= 3000) {
-    return { score: 90, status: "Excellent" };
-  }
-  return { score: 100, status: "Excellent" };
-}
-
-function getDashboardCashFlowLabel(
-  safeToSpend: number,
-  cashFlowStatus: CashFlowStatus | null,
-): "Healthy" | "Warning" | "Danger" {
-  if (safeToSpend < 0 || cashFlowStatus === "risk") return "Danger";
-  if (cashFlowStatus === "low") return "Warning";
-  const confidence = getConfidenceScore(safeToSpend);
-  if (confidence.status === "Danger") return "Danger";
-  if (confidence.status === "Low") return "Warning";
-  return "Healthy";
-}
-
 type EmergencyFundStatus = "Risky" | "Okay" | "Healthy";
 
 function getEmergencyFundStatus(monthsCovered: number): {
@@ -808,6 +937,13 @@ const spendingVerdictStyles: Record<
     badgeText: "text-yellow-300",
     title: "text-yellow-300",
   },
+  "Not Affordable Today": {
+    border: "border-orange-500/30",
+    bg: "bg-orange-500/10",
+    badge: "bg-orange-500/20",
+    badgeText: "text-orange-300",
+    title: "text-orange-300",
+  },
   "Not Affordable": {
     border: "border-red-500/30",
     bg: "bg-red-500/10",
@@ -818,12 +954,12 @@ const spendingVerdictStyles: Record<
 };
 
 const dashboardStatusStyles: Record<
-  "Healthy" | "Warning" | "Danger",
+  "Healthy" | "Tight" | "Shortfall Expected",
   { badgeText: string }
 > = {
   Healthy: { badgeText: "text-emerald-300" },
-  Warning: { badgeText: "text-yellow-300" },
-  Danger: { badgeText: "text-red-300" },
+  Tight: { badgeText: "text-yellow-300" },
+  "Shortfall Expected": { badgeText: "text-red-300" },
 };
 
 type SectionKey =
@@ -1131,9 +1267,6 @@ export default function Home() {
   const financialTimeline = hasDashboardData ? financialCalculation : null;
   const effectiveSafeToSpend = financialTimeline?.safeToSpend ?? 0;
   const cashShortfallDetected = financialTimeline?.hasShortfall ?? false;
-  const effectiveConfidenceScore = cashShortfallDetected
-    ? ({ score: 0, status: "Danger" } satisfies ConfidenceScore)
-    : getConfidenceScore(effectiveSafeToSpend);
   const cashFlowProjection = financialCalculation;
 
   useEffect(() => {
@@ -1263,16 +1396,6 @@ export default function Home() {
     checkingBalance,
     profile,
   ]);
-
-  const savingsGoalProgress =
-    Number(goalAmount) > 0
-      ? Math.min(
-          100,
-          Math.round(
-            ((Number(currentSaved) || 0) / Number(goalAmount)) * 100,
-          ),
-        )
-      : null;
 
   const monthlySurplusSummary =
     monthlyIncome !== "" || monthlyExpenses !== ""
@@ -1613,15 +1736,21 @@ export default function Home() {
     setTimelineEvents([]);
   };
 
-  const dashboardCashFlowStatus: CashFlowStatus | null =
-    financialTimeline?.status ?? financialCalculation?.status ?? null;
-
-  const dashboardCashFlowLabel = cashShortfallDetected
-    ? "Danger"
-    : getDashboardCashFlowLabel(
-        effectiveSafeToSpend,
-        dashboardCashFlowStatus,
-      );
+  const profileName = profile.name.trim();
+  const todayISO = toISODate(new Date());
+  const nextUpcomingPaycheck = getNextUpcomingPaycheck(plannedPaychecks);
+  const nextPaycheckLabel = nextUpcomingPaycheck
+    ? formatDueDate(nextUpcomingPaycheck.payDate)
+    : "Not scheduled yet";
+  const dashboardCashFlow = getDashboardCashFlowMessage(
+    cashShortfallDetected,
+    financialCalculation?.rows,
+    todayISO,
+    financialTimeline?.shortfallCause ?? null,
+  );
+  const dashboardCashFlowLabel = dashboardCashFlow.status;
+  const dashboardCashFlowSubtitle = dashboardCashFlow.subtitle;
+  const dashboardHealthMessage = dashboardCashFlow.message;
 
   const timelineTotals = unifiedTimelineEvents.reduce(
     (acc, event) => {
@@ -1826,58 +1955,76 @@ export default function Home() {
                   </svg>
                 }
               >
-                <dl className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-                  <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-3 sm:px-4">
-                    <dt className="text-[10px] font-medium uppercase tracking-wider text-slate-500 sm:text-xs">
+                <div className="space-y-1">
+                  <p className="text-xl font-semibold text-white sm:text-2xl">
+                    {profileName
+                      ? `Welcome back, ${profileName} 👋`
+                      : "Welcome back 👋"}
+                  </p>
+                  <p className="text-sm text-slate-400 sm:text-base">
+                    Here&apos;s your cash flow outlook.
+                  </p>
+                </div>
+                <dl className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
+                  <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
+                      Current Balance
+                    </dt>
+                    <dd className="mt-2 text-xl font-bold tabular-nums text-white sm:text-2xl">
+                      ${checkingBalanceAmount}
+                    </dd>
+                    <dd className="mt-1 text-xs text-slate-500 sm:text-sm">
+                      In your checking account today
+                    </dd>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
+                      Next Paycheck
+                    </dt>
+                    <dd className="mt-2 break-words text-lg font-bold leading-snug text-white sm:text-2xl">
+                      {nextPaycheckLabel}
+                    </dd>
+                    <dd className="mt-1 text-xs text-slate-500 sm:text-sm">
+                      Your next payday
+                    </dd>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
                       Safe To Spend
                     </dt>
-                    <dd className="mt-1 text-base font-bold tabular-nums text-white sm:text-lg">
+                    <dd className="mt-2 text-xl font-bold tabular-nums text-white sm:text-2xl">
                       ${effectiveSafeToSpend}
                     </dd>
-                  </div>
-                  <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-3 sm:px-4">
-                    <dt className="text-[10px] font-medium uppercase tracking-wider text-slate-500 sm:text-xs">
-                      Confidence
-                    </dt>
-                    <dd
-                      className={`mt-1 text-base font-bold tabular-nums sm:text-lg ${
-                        statusStyles[effectiveConfidenceScore.status].score
-                      }`}
-                    >
-                      {effectiveConfidenceScore.score}%
+                    <dd className="mt-1 text-xs text-slate-500 sm:text-sm">
+                      Without creating a shortfall
                     </dd>
                   </div>
-                  <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-3 sm:px-4">
-                    <dt className="text-[10px] font-medium uppercase tracking-wider text-slate-500 sm:text-xs">
-                      Cash Flow
+                  <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
+                      Cash Flow Status
                     </dt>
                     <dd
-                      className={`mt-1 text-base font-bold sm:text-lg ${
+                      className={`mt-2 text-xl font-bold sm:text-2xl ${
                         dashboardStatusStyles[dashboardCashFlowLabel].badgeText
                       }`}
                     >
                       {dashboardCashFlowLabel}
                     </dd>
-                  </div>
-                  <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-3 sm:px-4">
-                    <dt className="text-[10px] font-medium uppercase tracking-wider text-slate-500 sm:text-xs">
-                      Goal Progress
-                    </dt>
-                    <dd className="mt-1 text-base font-bold tabular-nums text-violet-200 sm:text-lg">
-                      {savingsGoalProgress === null
-                        ? "--"
-                        : `${savingsGoalProgress}%`}
+                    <dd className="mt-1 text-xs text-slate-500 sm:text-sm">
+                      {dashboardCashFlowSubtitle}
                     </dd>
                   </div>
                 </dl>
-                {cashShortfallDetected ? (
-                  <p
-                    role="alert"
-                    className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-                  >
-                    Bill due before paycheck. Cash shortfall detected.
-                  </p>
-                ) : null}
+                <p
+                  role="status"
+                  className={`mt-5 rounded-xl border px-4 py-3 text-sm sm:text-base ${
+                    cashShortfallDetected
+                      ? "border-red-500/30 bg-red-500/10 text-red-200"
+                      : "border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
+                  }`}
+                >
+                  {dashboardHealthMessage}
+                </p>
               </CollapsibleSection>
 
               <CollapsibleSection
@@ -3371,21 +3518,27 @@ export default function Home() {
                               : ""}
                         </dd>
                       </div>
-                      <div className="flex items-center justify-between gap-4 text-sm">
-                        <dt className="text-slate-400">Current Safe To Spend</dt>
+                      <div className="flex items-center justify-between gap-4 text-sm sm:text-base">
+                        <dt className="text-slate-400">Available by Purchase Date</dt>
                         <dd className="font-semibold tabular-nums text-white">
-                          ${spendingDecisionResult.currentSafeToSpend}
+                          ${spendingDecisionResult.availableByPurchaseDate}
                         </dd>
                       </div>
-                      {spendingDecisionResult.verdict === "Not Affordable" ? (
-                        <div className="flex items-center justify-between gap-4 text-sm">
-                          <dt className="text-red-400">Projected Shortfall</dt>
+                      {spendingDecisionResult.verdict === "Not Affordable" ||
+                      spendingDecisionResult.verdict === "Not Affordable Today" ? (
+                        <div className="flex items-center justify-between gap-4 text-sm sm:text-base">
+                          <dt className="text-red-400">Short by</dt>
                           <dd className="font-semibold tabular-nums text-red-300">
-                            ${spendingDecisionResult.projectedShortfall ?? 0}
+                            $
+                            {Math.max(
+                              0,
+                              spendingDecisionResult.purchaseCost -
+                                spendingDecisionResult.availableByPurchaseDate,
+                            )}
                           </dd>
                         </div>
                       ) : (
-                        <div className="flex items-center justify-between gap-4 text-sm">
+                        <div className="flex items-center justify-between gap-4 text-sm sm:text-base">
                           <dt className="text-slate-400">
                             {spendingDecisionResult.verdict === "Wait Until Payday"
                               ? "Projected Remaining Balance"
