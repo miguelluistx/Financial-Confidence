@@ -18,10 +18,14 @@ type SpendingVerdict =
   | "Not Affordable Today"
   | "Not Affordable";
 
-type PurchaseType =
-  | "One-Time Purchase"
-  | "Monthly Subscription"
-  | "Weekly Habit";
+type PurchaseType = "One-Time" | "Daily" | "Weekly" | "Monthly";
+
+type TimelineEventSource =
+  | { kind: "bill"; billId: string }
+  | { kind: "paycheck"; paycheckId: string }
+  | { kind: "recurring"; billId: string; occurrenceDate: string }
+  | { kind: "manual"; eventId: string }
+  | { kind: "planned-purchase"; eventId: string };
 
 type SpendingDecisionResult = {
   verdict: SpendingVerdict;
@@ -53,19 +57,19 @@ const DEFAULT_PROFILE: UserProfile = {
 
 function normalizePurchaseType(value: string | undefined): PurchaseType {
   switch (value) {
-    case "One-Time Purchase":
-    case "Monthly Subscription":
-    case "Weekly Habit":
-      return value;
     case "One-Time":
-      return "One-Time Purchase";
-    case "Monthly":
-      return "Monthly Subscription";
-    case "Weekly":
     case "Daily":
-      return "Weekly Habit";
+    case "Weekly":
+    case "Monthly":
+      return value;
+    case "One-Time Purchase":
+      return "One-Time";
+    case "Monthly Subscription":
+      return "Monthly";
+    case "Weekly Habit":
+      return "Weekly";
     default:
-      return "One-Time Purchase";
+      return "One-Time";
   }
 }
 
@@ -74,18 +78,58 @@ function getSpendingDecisionMonthlyImpact(
   purchaseType: PurchaseType,
 ): number {
   switch (purchaseType) {
-    case "One-Time Purchase":
+    case "One-Time":
       return cost;
-    case "Monthly Subscription":
-      return cost;
-    case "Weekly Habit":
+    case "Daily":
+      return cost * 30;
+    case "Weekly":
       return cost * 4;
+    case "Monthly":
+      return cost;
   }
 }
 
-function getWeeklyHabitMonthlyEquivalentLabel(cost: number): string {
-  const monthlyEquivalent = cost * 4;
-  return `$${cost}/week × 4 weeks = $${monthlyEquivalent}/month`;
+function getPurchaseFrequencyLabel(
+  cost: number,
+  purchaseType: PurchaseType,
+): string | null {
+  switch (purchaseType) {
+    case "Daily":
+      return `$${cost}/day equals about $${cost * 30}/month.`;
+    case "Weekly":
+      return `$${cost}/week equals about $${cost * 4}/month.`;
+    case "One-Time":
+    case "Monthly":
+      return null;
+  }
+}
+
+function parseTimelineEventSource(eventId: string): TimelineEventSource | null {
+  if (eventId.startsWith("bill-")) {
+    return { kind: "bill", billId: eventId.slice("bill-".length) };
+  }
+
+  if (eventId.startsWith("paycheck-")) {
+    return { kind: "paycheck", paycheckId: eventId.slice("paycheck-".length) };
+  }
+
+  if (eventId.startsWith("planned-purchase-")) {
+    return { kind: "planned-purchase", eventId };
+  }
+
+  if (eventId.startsWith("recurring-")) {
+    const remainder = eventId.slice("recurring-".length);
+    const occurrenceDate = remainder.slice(-10);
+    const billId = remainder.slice(0, -11);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate) || !billId) {
+      return null;
+    }
+
+    return { kind: "recurring", billId, occurrenceDate };
+  }
+
+  return { kind: "manual", eventId };
 }
 
 function isPlannedPurchaseEvent(eventId: string): boolean {
@@ -287,10 +331,7 @@ function evaluateSpendingDecision(
     evaluationDate,
     usedTodayForAnalysisOnly,
     explanation,
-    monthlyEquivalentLabel:
-      purchaseType === "Weekly Habit"
-        ? getWeeklyHabitMonthlyEquivalentLabel(cost)
-        : null,
+    monthlyEquivalentLabel: getPurchaseFrequencyLabel(cost, purchaseType),
   };
 }
 
@@ -364,9 +405,7 @@ function normalizeSpendingDecisionResult(
       "Even after upcoming income, this purchase would create a cash shortfall and should be avoided for now.",
     monthlyEquivalentLabel:
       result.monthlyEquivalentLabel ??
-      (purchaseType === "Weekly Habit"
-        ? getWeeklyHabitMonthlyEquivalentLabel(result.cost)
-        : null),
+      getPurchaseFrequencyLabel(result.cost, purchaseType),
   };
 }
 
@@ -376,6 +415,7 @@ type RecurringBill = {
   amount: number;
   dueDay: number;
   frequency: RecurringFrequency;
+  skippedDates?: string[];
 };
 
 type PlannedPaycheck = {
@@ -556,7 +596,10 @@ function buildFinancialTimelineEvents(
 
   const recurringEvents = recurringBills.flatMap((bill) =>
     getRecurringOccurrencesInRange(bill, today, horizonEnd)
-      .filter((date) => date <= horizonISO)
+      .filter(
+        (date) =>
+          date <= horizonISO && !bill.skippedDates?.includes(date),
+      )
       .map((date) => ({
         id: `recurring-${bill.id}-${date}`,
         name: bill.name,
@@ -1054,9 +1097,7 @@ export default function Home() {
   const [purchaseName, setPurchaseName] = useState("");
   const [purchaseAmount, setPurchaseAmount] = useState("");
   const [purchaseDate, setPurchaseDate] = useState("");
-  const [purchaseType, setPurchaseType] = useState<PurchaseType>(
-    "One-Time Purchase",
-  );
+  const [purchaseType, setPurchaseType] = useState<PurchaseType>("One-Time");
   const [spendingDecisionResult, setSpendingDecisionResult] =
     useState<SpendingDecisionResult | null>(null);
   const [goalName, setGoalName] = useState("");
@@ -1122,6 +1163,14 @@ export default function Home() {
   const [editingPaycheckId, setEditingPaycheckId] = useState<string | null>(
     null,
   );
+  const [editingTimelineEventId, setEditingTimelineEventId] = useState<
+    string | null
+  >(null);
+  const [editTimelineName, setEditTimelineName] = useState("");
+  const [editTimelineAmount, setEditTimelineAmount] = useState("");
+  const [editTimelineDate, setEditTimelineDate] = useState("");
+  const [editTimelineType, setEditTimelineType] =
+    useState<TimelineEventType>("Expense");
 
   const toggleSection = (key: SectionKey) => {
     setSectionOpen((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -1460,7 +1509,7 @@ export default function Home() {
     setPurchaseName("");
     setPurchaseAmount("");
     setPurchaseDate("");
-    setPurchaseType("One-Time Purchase");
+    setPurchaseType("One-Time");
     setSpendingDecisionResult(null);
     setGoalName("");
     setGoalAmount("");
@@ -1710,8 +1759,169 @@ export default function Home() {
     setSpendingDecisionResult(null);
   };
 
-  const removePlannedPurchase = (eventId: string) => {
-    setTimelineEvents((prev) => prev.filter((event) => event.id !== eventId));
+  const cancelEditTimelineEvent = () => {
+    setEditingTimelineEventId(null);
+    setEditTimelineName("");
+    setEditTimelineAmount("");
+    setEditTimelineDate("");
+    setEditTimelineType("Expense");
+  };
+
+  const startEditTimelineEvent = (event: TimelineEvent) => {
+    setEditingTimelineEventId(event.id);
+    setEditTimelineName(event.name);
+    setEditTimelineAmount(String(event.amount));
+    setEditTimelineDate(event.date);
+    setEditTimelineType(event.type);
+  };
+
+  const deleteTimelineEvent = (event: TimelineEvent) => {
+    const source = parseTimelineEventSource(event.id);
+    if (!source) return;
+
+    switch (source.kind) {
+      case "bill":
+        removeBill(source.billId);
+        break;
+      case "paycheck":
+        removePaycheck(source.paycheckId);
+        break;
+      case "recurring":
+        setRecurringBills((prev) =>
+          prev.map((bill) =>
+            bill.id === source.billId
+              ? {
+                  ...bill,
+                  skippedDates: Array.from(
+                    new Set([
+                      ...(bill.skippedDates ?? []),
+                      source.occurrenceDate,
+                    ]),
+                  ),
+                }
+              : bill,
+          ),
+        );
+        break;
+      case "planned-purchase":
+      case "manual":
+        setTimelineEvents((prev) =>
+          prev.filter((timelineEvent) => timelineEvent.id !== event.id),
+        );
+        break;
+    }
+
+    if (editingTimelineEventId === event.id) {
+      cancelEditTimelineEvent();
+    }
+  };
+
+  const saveEditTimelineEvent = () => {
+    if (!editingTimelineEventId) return;
+
+    const name = editTimelineName.trim();
+    const amount = Number(editTimelineAmount);
+    const date = editTimelineDate.trim();
+    const type = editTimelineType;
+
+    if (!name || !date || Number.isNaN(amount) || amount <= 0) return;
+
+    const source = parseTimelineEventSource(editingTimelineEventId);
+    if (!source) return;
+
+    switch (source.kind) {
+      case "bill":
+        if (type === "Expense") {
+          setPlannedBills((prev) =>
+            prev.map((bill) =>
+              bill.id === source.billId
+                ? { ...bill, name, amount, dueDate: date }
+                : bill,
+            ),
+          );
+        } else {
+          removeBill(source.billId);
+          setTimelineEvents((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), name, amount, date, type },
+          ]);
+        }
+        break;
+      case "paycheck":
+        if (type === "Income") {
+          setPlannedPaychecks((prev) =>
+            prev.map((paycheck) =>
+              paycheck.id === source.paycheckId
+                ? { ...paycheck, name, amount, payDate: date }
+                : paycheck,
+            ),
+          );
+        } else {
+          removePaycheck(source.paycheckId);
+          setTimelineEvents((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), name, amount, date, type },
+          ]);
+        }
+        break;
+      case "recurring": {
+        const originalDate = source.occurrenceDate;
+        if (type === "Expense" && date === originalDate) {
+          setRecurringBills((prev) =>
+            prev.map((bill) =>
+              bill.id === source.billId ? { ...bill, name, amount } : bill,
+            ),
+          );
+        } else if (type === "Expense") {
+          setRecurringBills((prev) =>
+            prev.map((bill) =>
+              bill.id === source.billId
+                ? {
+                    ...bill,
+                    skippedDates: Array.from(
+                      new Set([...(bill.skippedDates ?? []), originalDate]),
+                    ),
+                  }
+                : bill,
+            ),
+          );
+          setPlannedBills((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), name, amount, dueDate: date },
+          ]);
+        } else {
+          setRecurringBills((prev) =>
+            prev.map((bill) =>
+              bill.id === source.billId
+                ? {
+                    ...bill,
+                    skippedDates: Array.from(
+                      new Set([...(bill.skippedDates ?? []), originalDate]),
+                    ),
+                  }
+                : bill,
+            ),
+          );
+          setTimelineEvents((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), name, amount, date, type },
+          ]);
+        }
+        break;
+      }
+      case "planned-purchase":
+      case "manual":
+        setTimelineEvents((prev) =>
+          prev.map((event) =>
+            event.id === source.eventId
+              ? { ...event, name, amount, date, type }
+              : event,
+          ),
+        );
+        break;
+    }
+
+    cancelEditTimelineEvent();
   };
 
   const addTimelineEvent = () => {
@@ -1737,10 +1947,18 @@ export default function Home() {
 
   const profileName = profile.name.trim();
   const todayISO = toISODate(new Date());
-  const nextUpcomingPaycheck = getNextUpcomingPaycheck(plannedPaychecks);
-  const nextPaycheckLabel = nextUpcomingPaycheck
-    ? formatDueDate(nextUpcomingPaycheck.payDate)
-    : "Not scheduled yet";
+  const savingsGoalProgress =
+    Number(goalAmount) > 0
+      ? Math.min(
+          100,
+          Math.round(
+            ((Number(currentSaved) || 0) / Number(goalAmount)) * 100,
+          ),
+        )
+      : null;
+  const savingsGoalDisplayName = goalName.trim() || "Savings Goal";
+  const savingsGoalAmountDisplay = Number(goalAmount) || 0;
+  const savingsGoalSavedDisplay = Number(currentSaved) || 0;
   const dashboardCashFlow = getDashboardCashFlowMessage(
     cashShortfallDetected,
     financialCalculation?.rows,
@@ -1978,13 +2196,17 @@ export default function Home() {
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
                     <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
-                      Next Paycheck
+                      Savings Goal
                     </dt>
-                    <dd className="mt-2 break-words text-lg font-bold leading-snug text-white sm:text-2xl">
-                      {nextPaycheckLabel}
+                    <dd className="mt-2 text-lg font-bold leading-snug text-white sm:text-xl">
+                      {savingsGoalDisplayName}
                     </dd>
-                    <dd className="mt-1 text-xs text-slate-500 sm:text-sm">
-                      Your next payday
+                    <dd className="mt-2 text-xl font-bold tabular-nums text-violet-200 sm:text-2xl">
+                      {savingsGoalProgress ?? 0}%
+                    </dd>
+                    <dd className="mt-1 text-xs tabular-nums text-slate-500 sm:text-sm">
+                      ${savingsGoalSavedDisplay.toLocaleString()} / $
+                      {savingsGoalAmountDisplay.toLocaleString()}
                     </dd>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
@@ -2778,52 +3000,140 @@ export default function Home() {
                           visibleTimelineRows.map(({ event, runningBalance }) => (
                             <li
                               key={event.id}
-                              className={`flex flex-col gap-2 rounded-lg border px-4 py-3 text-sm sm:grid sm:grid-cols-[5rem_1fr_auto_auto_auto] sm:items-center sm:gap-3 ${
+                              className={`rounded-lg border px-4 py-3 text-sm ${
                                 event.type === "Income"
                                   ? "border-emerald-500/20 bg-emerald-500/5"
                                   : "border-red-500/20 bg-red-500/5"
                               }`}
                             >
-                              <span className="text-slate-400">
-                                {formatDueDate(event.date)}
-                              </span>
-                              <span
-                                className={`font-medium ${
-                                  event.type === "Income"
-                                    ? "text-emerald-100"
-                                    : "text-red-100"
-                                }`}
-                              >
-                                {event.name}
-                                {isPlannedPurchaseEvent(event.id) ? (
-                                  <span className="ml-2 text-xs font-normal text-slate-500">
-                                    Planned purchase
-                                  </span>
-                                ) : null}
-                              </span>
-                              <span
-                                className={`font-semibold tabular-nums ${
-                                  event.type === "Income"
-                                    ? "text-emerald-300"
-                                    : "text-red-300"
-                                }`}
-                              >
-                                {event.type === "Income" ? "+" : "-"}${event.amount}
-                              </span>
-                              <span className="font-semibold tabular-nums text-teal-200">
-                                ${runningBalance}
-                              </span>
-                              {isPlannedPurchaseEvent(event.id) ? (
-                                <button
-                                  type="button"
-                                  onClick={() => removePlannedPurchase(event.id)}
-                                  aria-label={`Delete planned purchase ${event.name}`}
-                                  className="justify-self-start rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-200 sm:justify-self-end"
-                                >
-                                  Delete
-                                </button>
+                              {editingTimelineEventId === event.id ? (
+                                <div className="space-y-3">
+                                  <div className="grid gap-3 sm:grid-cols-2">
+                                    <div className="sm:col-span-2">
+                                      <label className="mb-1 block text-xs font-medium text-slate-400">
+                                        Event Name
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editTimelineName}
+                                        onChange={(e) =>
+                                          setEditTimelineName(e.target.value)
+                                        }
+                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="mb-1 block text-xs font-medium text-slate-400">
+                                        Amount
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        value={editTimelineAmount}
+                                        onChange={(e) =>
+                                          setEditTimelineAmount(e.target.value)
+                                        }
+                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="mb-1 block text-xs font-medium text-slate-400">
+                                        Date
+                                      </label>
+                                      <input
+                                        type="date"
+                                        value={editTimelineDate}
+                                        onChange={(e) =>
+                                          setEditTimelineDate(e.target.value)
+                                        }
+                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20 [color-scheme:dark]"
+                                      />
+                                    </div>
+                                    <div className="sm:col-span-2">
+                                      <label className="mb-1 block text-xs font-medium text-slate-400">
+                                        Event Type
+                                      </label>
+                                      <select
+                                        value={editTimelineType}
+                                        onChange={(e) =>
+                                          setEditTimelineType(
+                                            e.target.value as TimelineEventType,
+                                          )
+                                        }
+                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
+                                      >
+                                        <option value="Income">Income</option>
+                                        <option value="Expense">Expense</option>
+                                      </select>
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={saveEditTimelineEvent}
+                                      className="rounded-lg border border-teal-500/40 bg-teal-600/20 px-3 py-1.5 text-xs font-semibold text-teal-300 transition hover:bg-teal-600/30"
+                                    >
+                                      Save
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={cancelEditTimelineEvent}
+                                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.07]"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
                               ) : (
-                                <span className="hidden sm:block" aria-hidden="true" />
+                                <div className="flex flex-col gap-3 sm:grid sm:grid-cols-[5rem_1fr_auto_auto_auto_auto] sm:items-center sm:gap-3">
+                                  <span className="text-slate-400">
+                                    {formatDueDate(event.date)}
+                                  </span>
+                                  <span
+                                    className={`font-medium ${
+                                      event.type === "Income"
+                                        ? "text-emerald-100"
+                                        : "text-red-100"
+                                    }`}
+                                  >
+                                    {event.name}
+                                    {isPlannedPurchaseEvent(event.id) ? (
+                                      <span className="ml-2 text-xs font-normal text-slate-500">
+                                        Planned purchase
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <span
+                                    className={`font-semibold tabular-nums ${
+                                      event.type === "Income"
+                                        ? "text-emerald-300"
+                                        : "text-red-300"
+                                    }`}
+                                  >
+                                    {event.type === "Income" ? "+" : "-"}$
+                                    {event.amount}
+                                  </span>
+                                  <span className="font-semibold tabular-nums text-teal-200">
+                                    ${runningBalance}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => startEditTimelineEvent(event)}
+                                    aria-label={`Edit ${event.name}`}
+                                    className="justify-self-start rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-teal-500/40 hover:bg-teal-500/10 hover:text-teal-200 sm:justify-self-end"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => deleteTimelineEvent(event)}
+                                    aria-label={`Delete ${event.name}`}
+                                    className="justify-self-start rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-200 sm:justify-self-end"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
                               )}
                             </li>
                           ))
@@ -3369,11 +3679,10 @@ export default function Home() {
                       }
                       className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-blue-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
-                      <option value="One-Time Purchase">One-Time Purchase</option>
-                      <option value="Monthly Subscription">
-                        Monthly Subscription
-                      </option>
-                      <option value="Weekly Habit">Weekly Habit</option>
+                      <option value="One-Time">One-Time</option>
+                      <option value="Daily">Daily</option>
+                      <option value="Weekly">Weekly</option>
+                      <option value="Monthly">Monthly</option>
                     </select>
                   </div>
 
@@ -3416,11 +3725,13 @@ export default function Home() {
                         className="block w-full rounded-xl border border-white/10 bg-white/5 py-3.5 pl-9 pr-4 text-white placeholder:text-slate-600 transition focus:border-blue-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                       />
                     </div>
-                    {purchaseType === "Weekly Habit" && purchaseAmount !== "" ? (
+                    {(purchaseType === "Daily" ||
+                      purchaseType === "Weekly") &&
+                    purchaseAmount !== "" ? (
                       <p className="mt-2 text-xs text-slate-500">
-                        Monthly equivalent:{" "}
-                        {getWeeklyHabitMonthlyEquivalentLabel(
+                        {getPurchaseFrequencyLabel(
                           Number(purchaseAmount) || 0,
+                          purchaseType,
                         )}
                       </p>
                     ) : null}
@@ -3496,9 +3807,6 @@ export default function Home() {
 
                     {spendingDecisionResult.monthlyEquivalentLabel ? (
                       <p className="mt-3 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-300">
-                        <span className="font-medium text-slate-400">
-                          Monthly equivalent:{" "}
-                        </span>
                         {spendingDecisionResult.monthlyEquivalentLabel}
                       </p>
                     ) : null}
@@ -3508,13 +3816,13 @@ export default function Home() {
                         <dt className="text-slate-400">Purchase Cost</dt>
                         <dd className="font-semibold tabular-nums text-white">
                           ${spendingDecisionResult.cost}
-                          {spendingDecisionResult.purchaseType ===
-                          "Weekly Habit"
+                          {spendingDecisionResult.purchaseType === "Weekly"
                             ? "/week"
-                            : spendingDecisionResult.purchaseType ===
-                                "Monthly Subscription"
-                              ? "/month"
-                              : ""}
+                            : spendingDecisionResult.purchaseType === "Daily"
+                              ? "/day"
+                              : spendingDecisionResult.purchaseType === "Monthly"
+                                ? "/month"
+                                : ""}
                         </dd>
                       </div>
                       <div className="flex items-center justify-between gap-4 text-sm sm:text-base">
