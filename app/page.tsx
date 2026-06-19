@@ -36,6 +36,8 @@ type ConfidenceScoreLabel =
   | "Risky"
   | "Dangerous";
 
+type CushionMeterLabel = "Excellent" | "Good" | "Caution" | "Low" | "Danger";
+
 type SpendingDecisionResult = {
   verdict: SpendingVerdict;
   purchaseName: string;
@@ -56,6 +58,16 @@ type SpendingDecisionResult = {
   impactSummary: string | null;
   confidenceScore: number;
   confidenceScoreLabel: ConfidenceScoreLabel;
+  confidenceScoreBefore: number;
+  confidenceScoreImpact: number;
+  currentRemainingCash: number;
+  remainingCashAfterPurchase: number;
+  monthlyImpactAmount: number;
+  annualImpactAmount: number;
+  lowestBalanceBeforePurchase: number;
+  lowestBalanceAfterPurchase: number;
+  cushionLabel: CushionMeterLabel;
+  cushionProgressPercent: number;
   mainAnswer: string;
   why: string;
   goalImpact: string | null;
@@ -438,6 +450,171 @@ function buildSpendingCoachOutput(params: {
   return { mainAnswer, why, goalImpact, recommendation };
 }
 
+function getLowestBalanceRiskStyles(amount: number): {
+  value: string;
+  border: string;
+  bg: string;
+} {
+  if (amount > 1000) {
+    return {
+      value: "text-emerald-300",
+      border: "border-emerald-500/20",
+      bg: "bg-emerald-500/10",
+    };
+  }
+
+  if (amount >= 500) {
+    return {
+      value: "text-yellow-300",
+      border: "border-yellow-500/20",
+      bg: "bg-yellow-500/10",
+    };
+  }
+
+  if (amount >= 0) {
+    return {
+      value: "text-orange-300",
+      border: "border-orange-500/20",
+      bg: "bg-orange-500/10",
+    };
+  }
+
+  return {
+    value: "text-red-300",
+    border: "border-red-500/20",
+    bg: "bg-red-500/10",
+  };
+}
+
+function getCushionMeter(remainingCash: number): {
+  label: CushionMeterLabel;
+  progressPercent: number;
+  bar: string;
+  text: string;
+  border: string;
+  bg: string;
+} {
+  let label: CushionMeterLabel;
+
+  if (remainingCash > 2000) label = "Excellent";
+  else if (remainingCash >= 1000) label = "Good";
+  else if (remainingCash >= 500) label = "Caution";
+  else if (remainingCash >= 0) label = "Low";
+  else label = "Danger";
+
+  const progressPercent =
+    remainingCash <= 0
+      ? 0
+      : Math.min(100, Math.round((remainingCash / 2000) * 100));
+
+  switch (label) {
+    case "Excellent":
+      return {
+        label,
+        progressPercent,
+        bar: "bg-emerald-400",
+        text: "text-emerald-300",
+        border: "border-emerald-500/20",
+        bg: "bg-emerald-500/10",
+      };
+    case "Good":
+      return {
+        label,
+        progressPercent,
+        bar: "bg-teal-400",
+        text: "text-teal-300",
+        border: "border-teal-500/20",
+        bg: "bg-teal-500/10",
+      };
+    case "Caution":
+      return {
+        label,
+        progressPercent,
+        bar: "bg-yellow-400",
+        text: "text-yellow-300",
+        border: "border-yellow-500/20",
+        bg: "bg-yellow-500/10",
+      };
+    case "Low":
+      return {
+        label,
+        progressPercent,
+        bar: "bg-orange-400",
+        text: "text-orange-300",
+        border: "border-orange-500/20",
+        bg: "bg-orange-500/10",
+      };
+    case "Danger":
+      return {
+        label,
+        progressPercent,
+        bar: "bg-red-400",
+        text: "text-red-300",
+        border: "border-red-500/20",
+        bg: "bg-red-500/10",
+      };
+  }
+}
+
+function buildPurchaseIntelligence(params: {
+  safeToSpend: number;
+  safeToSpendAfterPurchase: number;
+  purchaseCost: number;
+  annualImpact: number;
+  verdict: SpendingVerdict;
+  checkingBalance: number;
+  timelineEvents: TimelineEvent[];
+  fullSimulation: FinancialTimelineResult;
+}): {
+  confidenceScoreBefore: number;
+  confidenceScoreImpact: number;
+  currentRemainingCash: number;
+  remainingCashAfterPurchase: number;
+  monthlyImpactAmount: number;
+  annualImpactAmount: number;
+  lowestBalanceBeforePurchase: number;
+  lowestBalanceAfterPurchase: number;
+  cushionLabel: CushionMeterLabel;
+  cushionProgressPercent: number;
+} {
+  const baselineSimulation = runFinancialCalculation(
+    params.checkingBalance,
+    params.timelineEvents,
+  );
+  const baselineVerdict: SpendingVerdict = baselineSimulation.hasShortfall
+    ? "Not Affordable"
+    : "Affordable Now";
+  const confidenceBefore = calculateFinancialConfidenceScore(
+    baselineVerdict,
+    params.safeToSpend,
+    params.safeToSpend,
+  );
+  const confidenceAfter = calculateFinancialConfidenceScore(
+    params.verdict,
+    params.safeToSpend,
+    params.safeToSpendAfterPurchase,
+  );
+  const cushion = getCushionMeter(params.safeToSpendAfterPurchase);
+
+  return {
+    confidenceScoreBefore: confidenceBefore.score,
+    confidenceScoreImpact: confidenceAfter.score - confidenceBefore.score,
+    currentRemainingCash: params.safeToSpend,
+    remainingCashAfterPurchase: params.safeToSpendAfterPurchase,
+    monthlyImpactAmount: -params.purchaseCost,
+    annualImpactAmount: -params.annualImpact,
+    lowestBalanceBeforePurchase: baselineSimulation.lowestBalance,
+    lowestBalanceAfterPurchase: params.fullSimulation.lowestBalance,
+    cushionLabel: cushion.label,
+    cushionProgressPercent: cushion.progressPercent,
+  };
+}
+
+function formatSignedCurrency(amount: number): string {
+  if (amount >= 0) return `$${amount.toLocaleString()}`;
+  return `-$${Math.abs(amount).toLocaleString()}`;
+}
+
 function parseTimelineEventSource(eventId: string): TimelineEventSource | null {
   if (eventId.startsWith("bill-")) {
     return { kind: "bill", billId: eventId.slice("bill-".length) };
@@ -659,6 +836,16 @@ function evaluateSpendingDecision(
     safeToSpend,
     safeToSpendAfterPurchase,
   );
+  const purchaseIntelligence = buildPurchaseIntelligence({
+    safeToSpend,
+    safeToSpendAfterPurchase,
+    purchaseCost,
+    annualImpact,
+    verdict,
+    checkingBalance,
+    timelineEvents,
+    fullSimulation,
+  });
 
   return {
     verdict,
@@ -680,6 +867,16 @@ function evaluateSpendingDecision(
     impactSummary,
     confidenceScore: confidence.score,
     confidenceScoreLabel: confidence.label,
+    confidenceScoreBefore: purchaseIntelligence.confidenceScoreBefore,
+    confidenceScoreImpact: purchaseIntelligence.confidenceScoreImpact,
+    currentRemainingCash: purchaseIntelligence.currentRemainingCash,
+    remainingCashAfterPurchase: purchaseIntelligence.remainingCashAfterPurchase,
+    monthlyImpactAmount: purchaseIntelligence.monthlyImpactAmount,
+    annualImpactAmount: purchaseIntelligence.annualImpactAmount,
+    lowestBalanceBeforePurchase: purchaseIntelligence.lowestBalanceBeforePurchase,
+    lowestBalanceAfterPurchase: purchaseIntelligence.lowestBalanceAfterPurchase,
+    cushionLabel: purchaseIntelligence.cushionLabel,
+    cushionProgressPercent: purchaseIntelligence.cushionProgressPercent,
     mainAnswer: coach.mainAnswer,
     why: coach.why,
     goalImpact: coach.goalImpact,
@@ -794,6 +991,25 @@ function normalizeSpendingDecisionResult(
       getPurchaseImpactSummary(cost, purchaseType),
     confidenceScore: confidence.score,
     confidenceScoreLabel: confidence.label,
+    confidenceScoreBefore:
+      result.confidenceScoreBefore ?? confidence.score,
+    confidenceScoreImpact: result.confidenceScoreImpact ?? 0,
+    currentRemainingCash:
+      result.currentRemainingCash ?? currentSafeToSpend,
+    remainingCashAfterPurchase:
+      result.remainingCashAfterPurchase ?? safeToSpendAfterPurchase,
+    monthlyImpactAmount:
+      result.monthlyImpactAmount ?? -purchaseCost,
+    annualImpactAmount: result.annualImpactAmount ?? -annualImpact,
+    lowestBalanceBeforePurchase: result.lowestBalanceBeforePurchase ?? 0,
+    lowestBalanceAfterPurchase:
+      result.lowestBalanceAfterPurchase ??
+      result.projectedBalance ??
+      safeToSpendAfterPurchase,
+    cushionLabel: result.cushionLabel ?? getCushionMeter(safeToSpendAfterPurchase).label,
+    cushionProgressPercent:
+      result.cushionProgressPercent ??
+      getCushionMeter(safeToSpendAfterPurchase).progressPercent,
     mainAnswer: coach.mainAnswer,
     why: coach.why,
     goalImpact: coach.goalImpact,
@@ -2574,7 +2790,10 @@ export default function Home() {
     },
     { income: 0, expenses: 0 },
   );
-  const timelineNetCashFlow = timelineTotals.income - timelineTotals.expenses;
+  const timelineAvailableCash = cashFlowProjection
+    ? cashFlowProjection.startingBalance + timelineTotals.income
+    : 0;
+  const timelineRemainingCash = cashFlowProjection?.endingBalance ?? 0;
 
   const visibleTimelineRows =
     cashFlowProjection?.rows.filter(({ event }) => {
@@ -3558,47 +3777,99 @@ export default function Home() {
                     </dl>
 
                     {unifiedTimelineEvents.length > 0 && (
-                      <dl className="grid gap-3 sm:grid-cols-3">
-                        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm">
-                          <dt className="text-emerald-400">Total Income</dt>
-                          <dd className="mt-1 font-bold tabular-nums text-emerald-300">
-                            ${timelineTotals.income}
-                          </dd>
-                        </div>
-                        <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm">
-                          <dt className="text-red-400">Total Expenses</dt>
-                          <dd className="mt-1 font-bold tabular-nums text-red-300">
-                            ${timelineTotals.expenses}
-                          </dd>
-                        </div>
-                        <div
-                          className={`rounded-lg border px-4 py-3 text-sm ${
-                            timelineNetCashFlow >= 0
-                              ? "border-emerald-500/20 bg-emerald-500/5"
-                              : "border-red-500/20 bg-red-500/5"
-                          }`}
-                        >
-                          <dt
-                            className={
-                              timelineNetCashFlow >= 0
-                                ? "text-emerald-400"
-                                : "text-red-400"
-                            }
-                          >
-                            Net Cash Flow
-                          </dt>
-                          <dd
-                            className={`mt-1 font-bold tabular-nums ${
-                              timelineNetCashFlow >= 0
-                                ? "text-emerald-300"
-                                : "text-red-300"
+                      <>
+                        <dl className="grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm">
+                            <dt className="text-emerald-400">Available Cash</dt>
+                            <dd className="mt-1 font-bold tabular-nums text-emerald-300">
+                              ${timelineAvailableCash.toLocaleString()}
+                            </dd>
+                            <dd className="mt-1 text-xs text-slate-500">
+                              Starting balance + total income
+                            </dd>
+                          </div>
+                          <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm">
+                            <dt className="text-red-400">Total Expenses</dt>
+                            <dd className="mt-1 font-bold tabular-nums text-red-300">
+                              ${timelineTotals.expenses.toLocaleString()}
+                            </dd>
+                            <dd className="mt-1 text-xs text-slate-500">
+                              Bills and expense events only
+                            </dd>
+                          </div>
+                          <div
+                            className={`rounded-lg border px-4 py-3 text-sm ${
+                              timelineRemainingCash >= 0
+                                ? "border-emerald-500/20 bg-emerald-500/5"
+                                : "border-red-500/20 bg-red-500/5"
                             }`}
                           >
-                            {timelineNetCashFlow >= 0 ? "+" : "-"}$
-                            {Math.abs(timelineNetCashFlow)}
-                          </dd>
+                            <dt
+                              className={
+                                timelineRemainingCash >= 0
+                                  ? "text-emerald-400"
+                                  : "text-red-400"
+                              }
+                            >
+                              Remaining Cash
+                            </dt>
+                            <dd
+                              className={`mt-1 font-bold tabular-nums ${
+                                timelineRemainingCash >= 0
+                                  ? "text-emerald-300"
+                                  : "text-red-300"
+                              }`}
+                            >
+                              ${timelineRemainingCash.toLocaleString()}
+                            </dd>
+                            <dd className="mt-1 text-xs text-slate-500">
+                              Equals ending projected balance
+                            </dd>
+                          </div>
+                        </dl>
+
+                        <div className="rounded-xl border border-teal-500/20 bg-teal-500/5 px-4 py-4 sm:px-5 sm:py-5">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-teal-300">
+                            Projected Balance Formula
+                          </p>
+                          <dl className="mt-3 space-y-2 text-sm">
+                            <div className="flex items-center justify-between gap-4">
+                              <dt className="text-slate-400">Starting Balance</dt>
+                              <dd className="font-semibold tabular-nums text-white">
+                                ${cashFlowProjection.startingBalance.toLocaleString()}
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                              <dt className="text-emerald-400">+ Total Income</dt>
+                              <dd className="font-semibold tabular-nums text-emerald-300">
+                                + ${timelineTotals.income.toLocaleString()}
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-4 border-t border-white/10 pt-2">
+                              <dt className="font-medium text-emerald-200">
+                                = Available Cash
+                              </dt>
+                              <dd className="font-semibold tabular-nums text-emerald-300">
+                                ${timelineAvailableCash.toLocaleString()}
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                              <dt className="text-red-400">- Total Expenses</dt>
+                              <dd className="font-semibold tabular-nums text-red-300">
+                                - ${timelineTotals.expenses.toLocaleString()}
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-4 border-t border-white/10 pt-2">
+                              <dt className="font-medium text-slate-200">
+                                = Remaining Cash
+                              </dt>
+                              <dd className="text-base font-bold tabular-nums text-white">
+                                ${timelineRemainingCash.toLocaleString()}
+                              </dd>
+                            </div>
+                          </dl>
                         </div>
-                      </dl>
+                      </>
                     )}
 
                     {cashFlowProjection.rows.length > 0 && (
@@ -4220,6 +4491,162 @@ export default function Home() {
                       </p>
                     </div>
 
+                    <div className="mt-4 space-y-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-300">
+                        Purchase Intelligence
+                      </p>
+
+                      <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Purchase Impact
+                        </p>
+                        <dl className="mt-2 space-y-2 text-sm">
+                          <div className="flex items-center justify-between gap-4">
+                            <dt className="text-slate-400">Current Remaining Cash</dt>
+                            <dd className="font-semibold tabular-nums text-white">
+                              $
+                              {spendingDecisionResult.currentRemainingCash.toLocaleString()}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-4">
+                            <dt className="text-slate-400">After Purchase</dt>
+                            <dd className="font-semibold tabular-nums text-white">
+                              $
+                              {spendingDecisionResult.remainingCashAfterPurchase.toLocaleString()}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-4">
+                            <dt className="text-slate-400">Monthly Impact</dt>
+                            <dd className="font-semibold tabular-nums text-red-300">
+                              {formatSignedCurrency(
+                                spendingDecisionResult.monthlyImpactAmount,
+                              )}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-4">
+                            <dt className="text-slate-400">Annual Impact</dt>
+                            <dd className="font-semibold tabular-nums text-red-300">
+                              {formatSignedCurrency(
+                                spendingDecisionResult.annualImpactAmount,
+                              )}
+                            </dd>
+                          </div>
+                        </dl>
+                      </div>
+
+                      <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Confidence Score Impact
+                        </p>
+                        <dl className="mt-2 space-y-2 text-sm">
+                          <div className="flex items-center justify-between gap-4">
+                            <dt className="text-slate-400">Current Score</dt>
+                            <dd className="font-semibold tabular-nums text-white">
+                              {spendingDecisionResult.confidenceScoreBefore}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-4">
+                            <dt className="text-slate-400">After Purchase</dt>
+                            <dd className="font-semibold tabular-nums text-white">
+                              {spendingDecisionResult.confidenceScore}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-4 border-t border-white/10 pt-2">
+                            <dt className="font-medium text-slate-300">Impact</dt>
+                            <dd
+                              className={`font-bold tabular-nums ${
+                                spendingDecisionResult.confidenceScoreImpact >= 0
+                                  ? "text-emerald-300"
+                                  : "text-red-300"
+                              }`}
+                            >
+                              {spendingDecisionResult.confidenceScoreImpact >= 0
+                                ? "+"
+                                : ""}
+                              {spendingDecisionResult.confidenceScoreImpact}
+                            </dd>
+                          </div>
+                        </dl>
+                      </div>
+
+                      {(() => {
+                        const beforeRisk = getLowestBalanceRiskStyles(
+                          spendingDecisionResult.lowestBalanceBeforePurchase,
+                        );
+                        const afterRisk = getLowestBalanceRiskStyles(
+                          spendingDecisionResult.lowestBalanceAfterPurchase,
+                        );
+
+                        return (
+                          <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Lowest Balance Risk
+                            </p>
+                            <dl className="mt-2 space-y-2 text-sm">
+                              <div
+                                className={`flex items-center justify-between gap-4 rounded-lg border px-3 py-2 ${beforeRisk.border} ${beforeRisk.bg}`}
+                              >
+                                <dt className="text-slate-400">
+                                  Lowest Balance Before Purchase
+                                </dt>
+                                <dd
+                                  className={`font-semibold tabular-nums ${beforeRisk.value}`}
+                                >
+                                  $
+                                  {spendingDecisionResult.lowestBalanceBeforePurchase.toLocaleString()}
+                                </dd>
+                              </div>
+                              <div
+                                className={`flex items-center justify-between gap-4 rounded-lg border px-3 py-2 ${afterRisk.border} ${afterRisk.bg}`}
+                              >
+                                <dt className="text-slate-400">
+                                  Lowest Balance After Purchase
+                                </dt>
+                                <dd
+                                  className={`font-semibold tabular-nums ${afterRisk.value}`}
+                                >
+                                  $
+                                  {spendingDecisionResult.lowestBalanceAfterPurchase.toLocaleString()}
+                                </dd>
+                              </div>
+                            </dl>
+                          </div>
+                        );
+                      })()}
+
+                      {(() => {
+                        const cushion = getCushionMeter(
+                          spendingDecisionResult.remainingCashAfterPurchase,
+                        );
+
+                        return (
+                          <div
+                            className={`rounded-lg border px-4 py-3 ${cushion.border} ${cushion.bg}`}
+                          >
+                            <div className="flex items-center justify-between gap-4">
+                              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                Cushion Meter
+                              </p>
+                              <p className={`text-sm font-semibold ${cushion.text}`}>
+                                {cushion.label}
+                              </p>
+                            </div>
+                            <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+                              <div
+                                className={`h-full rounded-full transition-all ${cushion.bar}`}
+                                style={{ width: `${cushion.progressPercent}%` }}
+                              />
+                            </div>
+                            <p className="mt-2 text-xs text-slate-400">
+                              Based on remaining cash after purchase ($
+                              {spendingDecisionResult.remainingCashAfterPurchase.toLocaleString()}
+                              )
+                            </p>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
                     <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -4229,91 +4656,6 @@ export default function Home() {
                           {spendingDecisionResult.why}
                         </p>
                       </div>
-
-                      {spendingDecisionResult.purchaseType === "One-Time" ? (
-                        <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Purchase Impact
-                          </p>
-                          <dl className="mt-2 space-y-2 text-sm">
-                            <div className="flex items-center justify-between gap-4">
-                              <dt className="text-slate-400">One-time cost</dt>
-                              <dd className="font-semibold tabular-nums text-white">
-                                ${spendingDecisionResult.cost.toLocaleString()}
-                              </dd>
-                            </div>
-                          </dl>
-                        </div>
-                      ) : spendingDecisionResult.purchaseType === "Monthly" ? (
-                        <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Purchase Impact
-                          </p>
-                          <dl className="mt-2 space-y-2 text-sm">
-                            <div className="flex items-center justify-between gap-4">
-                              <dt className="text-slate-400">Monthly amount</dt>
-                              <dd className="font-semibold tabular-nums text-white">
-                                ${spendingDecisionResult.cost.toLocaleString()}/month
-                              </dd>
-                            </div>
-                            <div className="flex items-center justify-between gap-4">
-                              <dt className="text-slate-400">
-                                Estimated annual impact
-                              </dt>
-                              <dd className="font-semibold tabular-nums text-white">
-                                ${spendingDecisionResult.annualImpact.toLocaleString()}
-                              </dd>
-                            </div>
-                          </dl>
-                          {spendingDecisionResult.impactSummary ? (
-                            <p className="mt-3 text-xs leading-relaxed text-slate-400">
-                              {spendingDecisionResult.impactSummary}
-                            </p>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Purchase Impact
-                          </p>
-                          <dl className="mt-2 space-y-2 text-sm">
-                            <div className="flex items-center justify-between gap-4">
-                              <dt className="text-slate-400">
-                                {spendingDecisionResult.purchaseType === "Daily"
-                                  ? "Daily amount"
-                                  : "Weekly amount"}
-                              </dt>
-                              <dd className="font-semibold tabular-nums text-white">
-                                ${spendingDecisionResult.cost.toLocaleString()}
-                                {spendingDecisionResult.purchaseType === "Daily"
-                                  ? "/day"
-                                  : "/week"}
-                              </dd>
-                            </div>
-                            <div className="flex items-center justify-between gap-4">
-                              <dt className="text-slate-400">
-                                Estimated monthly impact
-                              </dt>
-                              <dd className="font-semibold tabular-nums text-white">
-                                ${spendingDecisionResult.monthlyImpact.toLocaleString()}
-                              </dd>
-                            </div>
-                            <div className="flex items-center justify-between gap-4">
-                              <dt className="text-slate-400">
-                                Estimated annual impact
-                              </dt>
-                              <dd className="font-semibold tabular-nums text-white">
-                                ${spendingDecisionResult.annualImpact.toLocaleString()}
-                              </dd>
-                            </div>
-                          </dl>
-                          {spendingDecisionResult.impactSummary ? (
-                            <p className="mt-3 text-xs leading-relaxed text-slate-400">
-                              {spendingDecisionResult.impactSummary}
-                            </p>
-                          ) : null}
-                        </div>
-                      )}
 
                       <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
