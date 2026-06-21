@@ -12,6 +12,8 @@ type PlannedBill = {
 
 type BillFormType = "one-time" | "recurring";
 
+type PaycheckFormType = "manual" | "recurring";
+
 type RecurringFrequency = "Monthly" | "Weekly" | "Biweekly";
 
 type SpendingVerdict =
@@ -25,6 +27,7 @@ type PurchaseType = "One-Time" | "Daily" | "Weekly" | "Monthly";
 type TimelineEventSource =
   | { kind: "bill"; billId: string }
   | { kind: "paycheck"; paycheckId: string }
+  | { kind: "recurring-paycheck"; paycheckId: string; occurrenceDate: string }
   | { kind: "recurring"; billId: string; occurrenceDate: string }
   | { kind: "manual"; eventId: string }
   | { kind: "planned-purchase"; eventId: string };
@@ -620,6 +623,18 @@ function parseTimelineEventSource(eventId: string): TimelineEventSource | null {
     return { kind: "bill", billId: eventId.slice("bill-".length) };
   }
 
+  if (eventId.startsWith("recurring-paycheck-")) {
+    const remainder = eventId.slice("recurring-paycheck-".length);
+    const occurrenceDate = remainder.slice(-10);
+    const paycheckId = remainder.slice(0, -11);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate) || !paycheckId) {
+      return null;
+    }
+
+    return { kind: "recurring-paycheck", paycheckId, occurrenceDate };
+  }
+
   if (eventId.startsWith("paycheck-")) {
     return { kind: "paycheck", paycheckId: eventId.slice("paycheck-".length) };
   }
@@ -1034,6 +1049,81 @@ type PlannedPaycheck = {
   payDate: string;
 };
 
+type RecurringPaycheck = {
+  id: string;
+  name: string;
+  amount: number;
+  frequency: RecurringFrequency;
+  firstPayDate: string;
+  futurePaycheckCount: number;
+  skippedDates?: string[];
+};
+
+type UpcomingPaycheck = {
+  payDate: string;
+  name: string;
+  amount: number;
+};
+
+type SpendingTransaction = {
+  id: string;
+  name: string;
+  amount: number;
+};
+
+type SpendingCategory = {
+  id: string;
+  name: string;
+  monthlyBudget: number;
+  transactions: SpendingTransaction[];
+};
+
+const DEFAULT_SPENDING_CATEGORY_NAMES = [
+  "Food",
+  "Gas",
+  "Entertainment",
+  "Shopping",
+  "Health",
+  "Subscriptions",
+  "Miscellaneous",
+] as const;
+
+function createDefaultSpendingCategories(): SpendingCategory[] {
+  return DEFAULT_SPENDING_CATEGORY_NAMES.map((name) => ({
+    id: crypto.randomUUID(),
+    name,
+    monthlyBudget: 0,
+    transactions: [],
+  }));
+}
+
+function getCategoryAmountSpent(category: SpendingCategory): number {
+  return category.transactions.reduce(
+    (sum, transaction) => sum + transaction.amount,
+    0,
+  );
+}
+
+function getCategoryAmountRemaining(category: SpendingCategory): number {
+  return category.monthlyBudget - getCategoryAmountSpent(category);
+}
+
+function getCategoryPercentUsed(category: SpendingCategory): number {
+  if (category.monthlyBudget <= 0) {
+    return getCategoryAmountSpent(category) > 0 ? 100 : 0;
+  }
+
+  return Math.round(
+    (getCategoryAmountSpent(category) / category.monthlyBudget) * 100,
+  );
+}
+
+function getSpendingProgressBarColor(percentUsed: number): string {
+  if (percentUsed >= 100) return "bg-red-500";
+  if (percentUsed >= 80) return "bg-yellow-500";
+  return "bg-emerald-500";
+}
+
 type TimelineEventType = "Income" | "Expense";
 
 type TimelineEvent = {
@@ -1144,23 +1234,123 @@ function runFinancialCalculation(
 }
 
 function getNextUpcomingPaycheck(
-  paychecks: PlannedPaycheck[],
-): PlannedPaycheck | null {
+  plannedPaychecks: PlannedPaycheck[],
+  recurringPaychecks: RecurringPaycheck[] = [],
+): UpcomingPaycheck | null {
   const today = toISODate(new Date());
-  const upcoming = [...paychecks]
+  const manual = plannedPaychecks
     .filter((paycheck) => paycheck.payDate >= today)
-    .sort((a, b) => a.payDate.localeCompare(b.payDate));
+    .map((paycheck) => ({
+      payDate: paycheck.payDate,
+      name: paycheck.name,
+      amount: paycheck.amount,
+    }));
+  const recurring = recurringPaychecks.flatMap((paycheck) =>
+    getRecurringPaycheckOccurrences(paycheck, today).map((payDate) => ({
+      payDate,
+      name: paycheck.name,
+      amount: paycheck.amount,
+    })),
+  );
+  const upcoming = [...manual, ...recurring].sort((a, b) =>
+    a.payDate.localeCompare(b.payDate),
+  );
   return upcoming[0] ?? null;
 }
 
-function getSafeToSpendHorizonEnd(plannedPaychecks: PlannedPaycheck[]): Date {
+function advanceRecurringPaycheckDate(
+  date: Date,
+  frequency: RecurringFrequency,
+  anchorDay: number,
+): void {
+  if (frequency === "Weekly") {
+    date.setDate(date.getDate() + 7);
+    return;
+  }
+
+  if (frequency === "Biweekly") {
+    date.setDate(date.getDate() + 14);
+    return;
+  }
+
+  date.setMonth(date.getMonth() + 1);
+  const daysInMonth = new Date(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    0,
+  ).getDate();
+  date.setDate(Math.min(anchorDay, daysInMonth));
+}
+
+function getRecurringPaycheckOccurrences(
+  paycheck: RecurringPaycheck,
+  todayISO: string,
+  horizonISO?: string,
+): string[] {
+  const targetCount = paycheck.futurePaycheckCount || 6;
+  const dates: string[] = [];
+  const [year, month, day] = paycheck.firstPayDate.split("-").map(Number);
+  const occurrence = new Date(year, month - 1, day);
+  occurrence.setHours(0, 0, 0, 0);
+
+  let iterations = 0;
+  const maxIterations = targetCount + 104;
+
+  while (dates.length < targetCount && iterations < maxIterations) {
+    iterations++;
+    const iso = toISODate(occurrence);
+
+    if (
+      iso >= todayISO &&
+      (!horizonISO || iso <= horizonISO) &&
+      !paycheck.skippedDates?.includes(iso)
+    ) {
+      dates.push(iso);
+    }
+
+    advanceRecurringPaycheckDate(occurrence, paycheck.frequency, day);
+  }
+
+  return dates;
+}
+
+function formatRecurringPaycheckSchedule(paycheck: RecurringPaycheck): string {
+  return `${paycheck.frequency} · First pay ${formatDueDate(paycheck.firstPayDate)} · ${paycheck.futurePaycheckCount} paychecks`;
+}
+
+function getSafeToSpendHorizonEnd(
+  plannedPaychecks: PlannedPaycheck[],
+  recurringPaychecks: RecurringPaycheck[] = [],
+): Date {
+  const todayISO = toISODate(new Date());
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   const horizonEnd = new Date(today);
   horizonEnd.setDate(horizonEnd.getDate() + 30);
 
-  const nextPaycheck = getNextUpcomingPaycheck(plannedPaychecks);
+  const upcomingDates = [
+    ...plannedPaychecks
+      .filter((paycheck) => paycheck.payDate >= todayISO)
+      .map((paycheck) => paycheck.payDate),
+    ...recurringPaychecks.flatMap((paycheck) =>
+      getRecurringPaycheckOccurrences(paycheck, todayISO),
+    ),
+  ].sort();
+
+  if (upcomingDates.length > 0) {
+    const lastDate = upcomingDates[upcomingDates.length - 1];
+    const [year, month, day] = lastDate.split("-").map(Number);
+    const lastPayDate = new Date(year, month - 1, day);
+    if (lastPayDate > horizonEnd) {
+      horizonEnd.setTime(lastPayDate.getTime());
+    }
+  }
+
+  const nextPaycheck = getNextUpcomingPaycheck(
+    plannedPaychecks,
+    recurringPaychecks,
+  );
   if (nextPaycheck) {
     const [year, month, day] = nextPaycheck.payDate.split("-").map(Number);
     const paycheckDate = new Date(year, month - 1, day);
@@ -1185,6 +1375,7 @@ function buildFinancialTimelineEvents(
   plannedBills: PlannedBill[],
   recurringBills: RecurringBill[],
   plannedPaychecks: PlannedPaycheck[],
+  recurringPaychecks: RecurringPaycheck[],
   timelineEvents: TimelineEvent[],
   horizonEnd: Date,
 ): TimelineEvent[] {
@@ -1218,7 +1409,7 @@ function buildFinancialTimelineEvents(
       })),
   );
 
-  const paycheckEvents: TimelineEvent[] = plannedPaychecks
+  const manualPaycheckEvents: TimelineEvent[] = plannedPaychecks
     .filter(
       (paycheck) =>
         paycheck.payDate >= todayISO && paycheck.payDate <= horizonISO,
@@ -1231,6 +1422,18 @@ function buildFinancialTimelineEvents(
       type: "Income" as const,
     }));
 
+  const recurringPaycheckEvents = recurringPaychecks.flatMap((paycheck) =>
+    getRecurringPaycheckOccurrences(paycheck, todayISO, horizonISO).map(
+      (date) => ({
+        id: `recurring-paycheck-${paycheck.id}-${date}`,
+        name: paycheck.name,
+        amount: paycheck.amount,
+        date,
+        type: "Income" as const,
+      }),
+    ),
+  );
+
   const manualEvents = timelineEvents.filter(
     (event) => event.date >= todayISO && event.date <= horizonISO,
   );
@@ -1238,7 +1441,8 @@ function buildFinancialTimelineEvents(
   return [
     ...billEvents,
     ...recurringEvents,
-    ...paycheckEvents,
+    ...manualPaycheckEvents,
+    ...recurringPaycheckEvents,
     ...manualEvents,
   ];
 }
@@ -1536,6 +1740,14 @@ type PersistedAppData = {
   paycheckName: string;
   paycheckAmount: string;
   paycheckDate: string;
+  paycheckFormType?: PaycheckFormType;
+  recurringPaychecks?: RecurringPaycheck[];
+  recurringPaycheckFrequency?: RecurringFrequency;
+  recurringPaycheckFirstPayDate?: string;
+  recurringPaycheckFutureCount?: string;
+  spendingCategories?: SpendingCategory[];
+  spendingCategoryName?: string;
+  spendingCategoryBudget?: string;
   checkingBalance: string;
   profile: UserProfile;
 };
@@ -1683,6 +1895,7 @@ type SectionKey =
   | "dashboardSummary"
   | "bills"
   | "paychecks"
+  | "monthlySpendingPlan"
   | "cashFlowTimeline"
   | "goalsAndPlanning"
   | "spendingDecision";
@@ -1809,6 +2022,28 @@ export default function Home() {
   const [paycheckName, setPaycheckName] = useState("");
   const [paycheckAmount, setPaycheckAmount] = useState("");
   const [paycheckDate, setPaycheckDate] = useState("");
+  const [paycheckFormType, setPaycheckFormType] =
+    useState<PaycheckFormType>("manual");
+  const [recurringPaychecks, setRecurringPaychecks] = useState<
+    RecurringPaycheck[]
+  >([]);
+  const [recurringPaycheckFrequency, setRecurringPaycheckFrequency] =
+    useState<RecurringFrequency>("Biweekly");
+  const [recurringPaycheckFirstPayDate, setRecurringPaycheckFirstPayDate] =
+    useState("");
+  const [recurringPaycheckFutureCount, setRecurringPaycheckFutureCount] =
+    useState("6");
+  const [spendingCategories, setSpendingCategories] = useState<
+    SpendingCategory[]
+  >([]);
+  const [spendingCategoryName, setSpendingCategoryName] = useState("");
+  const [spendingCategoryBudget, setSpendingCategoryBudget] = useState("");
+  const [editingSpendingCategoryId, setEditingSpendingCategoryId] = useState<
+    string | null
+  >(null);
+  const [spendingTransactionDrafts, setSpendingTransactionDrafts] = useState<
+    Record<string, { name: string; amount: string }>
+  >({});
   const [checkingBalance, setCheckingBalance] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<
     "all" | "income" | "expense"
@@ -1818,6 +2053,7 @@ export default function Home() {
     dashboardSummary: true,
     bills: false,
     paychecks: false,
+    monthlySpendingPlan: false,
     cashFlowTimeline: false,
     goalsAndPlanning: false,
     spendingDecision: false,
@@ -1837,6 +2073,9 @@ export default function Home() {
   });
   const [editingBillId, setEditingBillId] = useState<string | null>(null);
   const [editingRecurringBillId, setEditingRecurringBillId] = useState<
+    string | null
+  >(null);
+  const [editingRecurringPaycheckId, setEditingRecurringPaycheckId] = useState<
     string | null
   >(null);
   const [editingPaycheckId, setEditingPaycheckId] = useState<string | null>(
@@ -1902,6 +2141,14 @@ export default function Home() {
     paycheckName,
     paycheckAmount,
     paycheckDate,
+    paycheckFormType,
+    recurringPaychecks,
+    recurringPaycheckFrequency,
+    recurringPaycheckFirstPayDate,
+    recurringPaycheckFutureCount,
+    spendingCategories,
+    spendingCategoryName,
+    spendingCategoryBudget,
     checkingBalance,
     profile,
   };
@@ -1982,14 +2229,19 @@ export default function Home() {
     plannedBills.length > 0 ||
     recurringBills.length > 0 ||
     plannedPaychecks.length > 0 ||
+    recurringPaychecks.length > 0 ||
     purchaseAmount !== "" ||
     spendingDecisionResult !== null;
 
-  const timelineHorizonEnd = getSafeToSpendHorizonEnd(plannedPaychecks);
+  const timelineHorizonEnd = getSafeToSpendHorizonEnd(
+    plannedPaychecks,
+    recurringPaychecks,
+  );
   const unifiedTimelineEvents = buildFinancialTimelineEvents(
     plannedBills,
     recurringBills,
     plannedPaychecks,
+    recurringPaychecks,
     timelineEvents,
     timelineHorizonEnd,
   );
@@ -2077,12 +2329,30 @@ export default function Home() {
       setPaycheckName(legacySaved.paycheckName ?? "");
       setPaycheckAmount(legacySaved.paycheckAmount ?? "");
       setPaycheckDate(legacySaved.paycheckDate ?? "");
+      setPaycheckFormType(legacySaved.paycheckFormType ?? "manual");
+      setRecurringPaychecks(legacySaved.recurringPaychecks ?? []);
+      setRecurringPaycheckFrequency(
+        legacySaved.recurringPaycheckFrequency ?? "Biweekly",
+      );
+      setRecurringPaycheckFirstPayDate(
+        legacySaved.recurringPaycheckFirstPayDate ?? "",
+      );
+      setRecurringPaycheckFutureCount(
+        legacySaved.recurringPaycheckFutureCount ?? "6",
+      );
+      setSpendingCategories(
+        legacySaved.spendingCategories ?? createDefaultSpendingCategories(),
+      );
+      setSpendingCategoryName(legacySaved.spendingCategoryName ?? "");
+      setSpendingCategoryBudget(legacySaved.spendingCategoryBudget ?? "");
 
       const loadedProfile = legacySaved.profile;
       setProfile({
         name: loadedProfile?.name ?? "",
         email: loadedProfile?.email ?? "",
       });
+    } else {
+      setSpendingCategories(createDefaultSpendingCategories());
     }
     setIsHydrated(true);
   }, []);
@@ -2125,6 +2395,14 @@ export default function Home() {
     paycheckName,
     paycheckAmount,
     paycheckDate,
+    paycheckFormType,
+    recurringPaychecks,
+    recurringPaycheckFrequency,
+    recurringPaycheckFirstPayDate,
+    recurringPaycheckFutureCount,
+    spendingCategories,
+    spendingCategoryName,
+    spendingCategoryBudget,
     checkingBalance,
     profile,
   ]);
@@ -2309,6 +2587,18 @@ export default function Home() {
     setPaycheckName("");
     setPaycheckAmount("");
     setPaycheckDate("");
+    setPaycheckFormType("manual");
+    setRecurringPaychecks([]);
+    setRecurringPaycheckFrequency("Biweekly");
+    setRecurringPaycheckFirstPayDate("");
+    setRecurringPaycheckFutureCount("6");
+    setEditingRecurringPaycheckId(null);
+    setEditingPaycheckId(null);
+    setSpendingCategories(createDefaultSpendingCategories());
+    setSpendingCategoryName("");
+    setSpendingCategoryBudget("");
+    setEditingSpendingCategoryId(null);
+    setSpendingTransactionDrafts({});
     setCheckingBalance("");
     setProfile(DEFAULT_PROFILE);
     setProfileMessage("");
@@ -2468,7 +2758,24 @@ export default function Home() {
     }
   };
 
-  const savePaycheck = () => {
+  const resetPaycheckFormFields = () => {
+    setPaycheckName("");
+    setPaycheckAmount("");
+    setPaycheckDate("");
+    setRecurringPaycheckFrequency("Biweekly");
+    setRecurringPaycheckFirstPayDate("");
+    setRecurringPaycheckFutureCount("6");
+    setEditingPaycheckId(null);
+    setEditingRecurringPaycheckId(null);
+  };
+
+  const handlePaycheckFormTypeChange = (type: PaycheckFormType) => {
+    setPaycheckFormType(type);
+    setEditingPaycheckId(null);
+    setEditingRecurringPaycheckId(null);
+  };
+
+  const saveManualPaycheck = () => {
     const name = paycheckName.trim();
     const amount = Number(paycheckAmount);
     const payDate = paycheckDate.trim();
@@ -2483,7 +2790,6 @@ export default function Home() {
             : paycheck,
         ),
       );
-      setEditingPaycheckId(null);
     } else {
       setPlannedPaychecks((prev) => [
         ...prev,
@@ -2491,12 +2797,63 @@ export default function Home() {
       ]);
     }
 
-    setPaycheckName("");
-    setPaycheckAmount("");
-    setPaycheckDate("");
+    resetPaycheckFormFields();
+  };
+
+  const saveRecurringPaycheck = () => {
+    const name = paycheckName.trim();
+    const amount = Number(paycheckAmount);
+    const firstPayDate = recurringPaycheckFirstPayDate.trim();
+    const futureCount = Number(recurringPaycheckFutureCount);
+
+    if (
+      !name ||
+      !firstPayDate ||
+      Number.isNaN(amount) ||
+      amount <= 0 ||
+      Number.isNaN(futureCount) ||
+      futureCount < 1
+    ) {
+      return;
+    }
+
+    const recurringPayload = {
+      name,
+      amount,
+      frequency: recurringPaycheckFrequency,
+      firstPayDate,
+      futurePaycheckCount: Math.round(futureCount),
+    };
+
+    if (editingRecurringPaycheckId) {
+      setRecurringPaychecks((prev) =>
+        prev.map((paycheck) =>
+          paycheck.id === editingRecurringPaycheckId
+            ? { ...paycheck, ...recurringPayload }
+            : paycheck,
+        ),
+      );
+    } else {
+      setRecurringPaychecks((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), ...recurringPayload },
+      ]);
+    }
+
+    resetPaycheckFormFields();
+  };
+
+  const savePaycheck = () => {
+    if (paycheckFormType === "manual") {
+      saveManualPaycheck();
+    } else {
+      saveRecurringPaycheck();
+    }
   };
 
   const startEditPaycheck = (paycheck: PlannedPaycheck) => {
+    setPaycheckFormType("manual");
+    setEditingRecurringPaycheckId(null);
     setEditingPaycheckId(paycheck.id);
     setPaycheckName(paycheck.name);
     setPaycheckAmount(String(paycheck.amount));
@@ -2506,11 +2863,145 @@ export default function Home() {
   const removePaycheck = (id: string) => {
     setPlannedPaychecks((prev) => prev.filter((paycheck) => paycheck.id !== id));
     if (editingPaycheckId === id) {
-      setEditingPaycheckId(null);
-      setPaycheckName("");
-      setPaycheckAmount("");
-      setPaycheckDate("");
+      resetPaycheckFormFields();
     }
+  };
+
+  const startEditRecurringPaycheck = (paycheck: RecurringPaycheck) => {
+    setPaycheckFormType("recurring");
+    setEditingPaycheckId(null);
+    setEditingRecurringPaycheckId(paycheck.id);
+    setPaycheckName(paycheck.name);
+    setPaycheckAmount(String(paycheck.amount));
+    setRecurringPaycheckFrequency(paycheck.frequency);
+    setRecurringPaycheckFirstPayDate(paycheck.firstPayDate);
+    setRecurringPaycheckFutureCount(String(paycheck.futurePaycheckCount));
+  };
+
+  const removeRecurringPaycheck = (id: string) => {
+    setRecurringPaychecks((prev) =>
+      prev.filter((paycheck) => paycheck.id !== id),
+    );
+    if (editingRecurringPaycheckId === id) {
+      resetPaycheckFormFields();
+    }
+  };
+
+  const resetSpendingCategoryFormFields = () => {
+    setSpendingCategoryName("");
+    setSpendingCategoryBudget("");
+    setEditingSpendingCategoryId(null);
+  };
+
+  const saveSpendingCategory = () => {
+    const name = spendingCategoryName.trim();
+    const monthlyBudget = Number(spendingCategoryBudget);
+
+    if (!name || Number.isNaN(monthlyBudget) || monthlyBudget < 0) return;
+
+    if (editingSpendingCategoryId) {
+      setSpendingCategories((prev) =>
+        prev.map((category) =>
+          category.id === editingSpendingCategoryId
+            ? { ...category, name, monthlyBudget }
+            : category,
+        ),
+      );
+    } else {
+      setSpendingCategories((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          name,
+          monthlyBudget,
+          transactions: [],
+        },
+      ]);
+    }
+
+    resetSpendingCategoryFormFields();
+  };
+
+  const startEditSpendingCategory = (category: SpendingCategory) => {
+    setEditingSpendingCategoryId(category.id);
+    setSpendingCategoryName(category.name);
+    setSpendingCategoryBudget(String(category.monthlyBudget));
+  };
+
+  const removeSpendingCategory = (id: string) => {
+    setSpendingCategories((prev) =>
+      prev.filter((category) => category.id !== id),
+    );
+    setSpendingTransactionDrafts((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    if (editingSpendingCategoryId === id) {
+      resetSpendingCategoryFormFields();
+    }
+  };
+
+  const getSpendingTransactionDraft = (categoryId: string) =>
+    spendingTransactionDrafts[categoryId] ?? { name: "", amount: "" };
+
+  const updateSpendingTransactionDraft = (
+    categoryId: string,
+    field: "name" | "amount",
+    value: string,
+  ) => {
+    setSpendingTransactionDrafts((prev) => ({
+      ...prev,
+      [categoryId]: {
+        ...(prev[categoryId] ?? { name: "", amount: "" }),
+        [field]: value,
+      },
+    }));
+  };
+
+  const addSpendingTransaction = (categoryId: string) => {
+    const draft = getSpendingTransactionDraft(categoryId);
+    const name = draft.name.trim();
+    const amount = Number(draft.amount);
+
+    if (!name || Number.isNaN(amount) || amount <= 0) return;
+
+    setSpendingCategories((prev) =>
+      prev.map((category) =>
+        category.id === categoryId
+          ? {
+              ...category,
+              transactions: [
+                ...category.transactions,
+                { id: crypto.randomUUID(), name, amount },
+              ],
+            }
+          : category,
+      ),
+    );
+
+    setSpendingTransactionDrafts((prev) => ({
+      ...prev,
+      [categoryId]: { name: "", amount: "" },
+    }));
+  };
+
+  const removeSpendingTransaction = (
+    categoryId: string,
+    transactionId: string,
+  ) => {
+    setSpendingCategories((prev) =>
+      prev.map((category) =>
+        category.id === categoryId
+          ? {
+              ...category,
+              transactions: category.transactions.filter(
+                (transaction) => transaction.id !== transactionId,
+              ),
+            }
+          : category,
+      ),
+    );
   };
 
   const submitSpendingDecision = () => {
@@ -2609,6 +3100,23 @@ export default function Home() {
                   ),
                 }
               : bill,
+          ),
+        );
+        break;
+      case "recurring-paycheck":
+        setRecurringPaychecks((prev) =>
+          prev.map((paycheck) =>
+            paycheck.id === source.paycheckId
+              ? {
+                  ...paycheck,
+                  skippedDates: Array.from(
+                    new Set([
+                      ...(paycheck.skippedDates ?? []),
+                      source.occurrenceDate,
+                    ]),
+                  ),
+                }
+              : paycheck,
           ),
         );
         break;
@@ -2718,6 +3226,53 @@ export default function Home() {
         }
         break;
       }
+      case "recurring-paycheck": {
+        const originalDate = source.occurrenceDate;
+        if (type === "Income" && date === originalDate) {
+          setRecurringPaychecks((prev) =>
+            prev.map((paycheck) =>
+              paycheck.id === source.paycheckId
+                ? { ...paycheck, name, amount }
+                : paycheck,
+            ),
+          );
+        } else if (type === "Income") {
+          setRecurringPaychecks((prev) =>
+            prev.map((paycheck) =>
+              paycheck.id === source.paycheckId
+                ? {
+                    ...paycheck,
+                    skippedDates: Array.from(
+                      new Set([...(paycheck.skippedDates ?? []), originalDate]),
+                    ),
+                  }
+                : paycheck,
+            ),
+          );
+          setPlannedPaychecks((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), name, amount, payDate: date },
+          ]);
+        } else {
+          setRecurringPaychecks((prev) =>
+            prev.map((paycheck) =>
+              paycheck.id === source.paycheckId
+                ? {
+                    ...paycheck,
+                    skippedDates: Array.from(
+                      new Set([...(paycheck.skippedDates ?? []), originalDate]),
+                    ),
+                  }
+                : paycheck,
+            ),
+          );
+          setTimelineEvents((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), name, amount, date, type },
+          ]);
+        }
+        break;
+      }
       case "planned-purchase":
       case "manual":
         setTimelineEvents((prev) =>
@@ -2764,7 +3319,10 @@ export default function Home() {
         spendingDecisionResult.safeToSpendAfterPurchase,
       )
     : null;
-  const nextUpcomingPaycheck = getNextUpcomingPaycheck(plannedPaychecks);
+  const nextUpcomingPaycheck = getNextUpcomingPaycheck(
+    plannedPaychecks,
+    recurringPaychecks,
+  );
   const nextPaycheckDateLabel = nextUpcomingPaycheck
     ? formatDueDate(nextUpcomingPaycheck.payDate)
     : "Not scheduled";
@@ -3457,7 +4015,7 @@ export default function Home() {
               <CollapsibleSection
                 id="paychecks"
                 title="Paychecks"
-                subtitle="Add upcoming paychecks manually — amounts can vary"
+                subtitle="Add manual or recurring paychecks — amounts can vary"
                 iconClassName="bg-emerald-600/20 text-emerald-400"
                 isOpen={sectionOpen.paychecks}
                 onToggle={() => toggleSection("paychecks")}
@@ -3479,84 +4037,241 @@ export default function Home() {
                   </svg>
                 }
               >
-                <form
-                  className="space-y-4"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    savePaycheck();
-                  }}
-                >
-                  <div>
-                    <label
-                      htmlFor="paycheck-name"
-                      className="mb-2 block text-sm font-medium text-slate-300"
-                    >
-                      Paycheck Name
-                    </label>
-                    <input
-                      id="paycheck-name"
-                      type="text"
-                      placeholder="Example: Week 1 Pay"
-                      value={paycheckName}
-                      onChange={(e) => setPaycheckName(e.target.value)}
-                      className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-                    />
-                  </div>
+                <div className="space-y-6">
+                  <form
+                    className="space-y-4"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      savePaycheck();
+                    }}
+                  >
+                    <fieldset>
+                      <legend className="mb-2 block text-sm font-medium text-slate-300">
+                        Paycheck Type
+                      </legend>
+                      <div className="flex flex-wrap gap-4">
+                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
+                          <input
+                            type="radio"
+                            name="paycheck-type"
+                            checked={paycheckFormType === "manual"}
+                            onChange={() =>
+                              handlePaycheckFormTypeChange("manual")
+                            }
+                            className="h-4 w-4 border-white/20 bg-white/5 text-emerald-500 focus:ring-emerald-500/30"
+                          />
+                          Manual Paycheck
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
+                          <input
+                            type="radio"
+                            name="paycheck-type"
+                            checked={paycheckFormType === "recurring"}
+                            onChange={() =>
+                              handlePaycheckFormTypeChange("recurring")
+                            }
+                            className="h-4 w-4 border-white/20 bg-white/5 text-emerald-500 focus:ring-emerald-500/30"
+                          />
+                          Recurring Paycheck
+                        </label>
+                      </div>
+                    </fieldset>
 
-                  <div>
-                    <label
-                      htmlFor="paycheck-amount"
-                      className="mb-2 block text-sm font-medium text-slate-300"
-                    >
-                      Net Paycheck Amount
-                    </label>
-                    <div className="relative">
-                      <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4 text-slate-500">
-                        $
-                      </span>
+                    <div>
+                      <label
+                        htmlFor="paycheck-name"
+                        className="mb-2 block text-sm font-medium text-slate-300"
+                      >
+                        Paycheck Name
+                      </label>
                       <input
-                        id="paycheck-amount"
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        placeholder="0.00"
-                        value={paycheckAmount}
-                        onChange={(e) => setPaycheckAmount(e.target.value)}
-                        className="block w-full rounded-xl border border-white/10 bg-white/5 py-3.5 pl-9 pr-4 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                        id="paycheck-name"
+                        type="text"
+                        placeholder="Example: Week 1 Pay"
+                        value={paycheckName}
+                        onChange={(e) => setPaycheckName(e.target.value)}
+                        className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
                       />
                     </div>
+
+                    <div>
+                      <label
+                        htmlFor="paycheck-amount"
+                        className="mb-2 block text-sm font-medium text-slate-300"
+                      >
+                        Amount
+                      </label>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4 text-slate-500">
+                          $
+                        </span>
+                        <input
+                          id="paycheck-amount"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          placeholder="0.00"
+                          value={paycheckAmount}
+                          onChange={(e) => setPaycheckAmount(e.target.value)}
+                          className="block w-full rounded-xl border border-white/10 bg-white/5 py-3.5 pl-9 pr-4 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                        />
+                      </div>
+                    </div>
+
+                    {paycheckFormType === "manual" ? (
+                      <div>
+                        <label
+                          htmlFor="paycheck-date"
+                          className="mb-2 block text-sm font-medium text-slate-300"
+                        >
+                          Pay Date
+                        </label>
+                        <input
+                          id="paycheck-date"
+                          type="date"
+                          value={paycheckDate}
+                          onChange={(e) => setPaycheckDate(e.target.value)}
+                          className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20 [color-scheme:dark]"
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <div>
+                          <label
+                            htmlFor="recurring-paycheck-frequency"
+                            className="mb-2 block text-sm font-medium text-slate-300"
+                          >
+                            Frequency
+                          </label>
+                          <select
+                            id="recurring-paycheck-frequency"
+                            value={recurringPaycheckFrequency}
+                            onChange={(e) =>
+                              setRecurringPaycheckFrequency(
+                                e.target.value as RecurringFrequency,
+                              )
+                            }
+                            className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                          >
+                            <option value="Weekly">Weekly</option>
+                            <option value="Biweekly">Biweekly</option>
+                            <option value="Monthly">Monthly</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label
+                            htmlFor="recurring-paycheck-first-date"
+                            className="mb-2 block text-sm font-medium text-slate-300"
+                          >
+                            First Pay Date
+                          </label>
+                          <input
+                            id="recurring-paycheck-first-date"
+                            type="date"
+                            value={recurringPaycheckFirstPayDate}
+                            onChange={(e) =>
+                              setRecurringPaycheckFirstPayDate(e.target.value)
+                            }
+                            className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20 [color-scheme:dark]"
+                          />
+                        </div>
+
+                        <div>
+                          <label
+                            htmlFor="recurring-paycheck-future-count"
+                            className="mb-2 block text-sm font-medium text-slate-300"
+                          >
+                            Number of Future Paychecks to Generate
+                          </label>
+                          <input
+                            id="recurring-paycheck-future-count"
+                            type="number"
+                            min="1"
+                            step="1"
+                            placeholder="6"
+                            value={recurringPaycheckFutureCount}
+                            onChange={(e) =>
+                              setRecurringPaycheckFutureCount(e.target.value)
+                            }
+                            className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    <button
+                      type="submit"
+                      className="w-full rounded-xl border border-emerald-500/40 bg-emerald-600/20 py-3.5 text-sm font-semibold text-emerald-300 transition hover:border-emerald-500/60 hover:bg-emerald-600/30 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 active:bg-emerald-600/40"
+                    >
+                      {paycheckFormType === "manual"
+                        ? editingPaycheckId
+                          ? "Save Paycheck"
+                          : "Add Paycheck"
+                        : editingRecurringPaycheckId
+                          ? "Save Recurring Paycheck"
+                          : "Add Recurring Paycheck"}
+                    </button>
+                  </form>
+
+                  <div>
+                    <h3 className="mb-3 text-sm font-semibold text-slate-300">
+                      Upcoming Paychecks
+                    </h3>
+                    {plannedPaychecks.length > 0 ? (
+                      <ul className="space-y-2">
+                        {[...plannedPaychecks]
+                          .sort((a, b) => a.payDate.localeCompare(b.payDate))
+                          .map((paycheck) => (
+                            <li
+                              key={paycheck.id}
+                              className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <p className="font-medium text-white">
+                                  {paycheck.name}
+                                </p>
+                                <p className="text-xs text-slate-500">
+                                  {formatDueDate(paycheck.payDate)}
+                                </p>
+                              </div>
+                              <span className="font-semibold tabular-nums text-emerald-200">
+                                ${paycheck.amount}
+                              </span>
+                              <div className="flex shrink-0 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => startEditPaycheck(paycheck)}
+                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-emerald-500/40 hover:text-emerald-300"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removePaycheck(paycheck.id)}
+                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                  aria-label={`Remove ${paycheck.name}`}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </li>
+                          ))}
+                      </ul>
+                    ) : (
+                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                        No upcoming paychecks yet.
+                      </p>
+                    )}
                   </div>
 
                   <div>
-                    <label
-                      htmlFor="paycheck-date"
-                      className="mb-2 block text-sm font-medium text-slate-300"
-                    >
-                      Pay Date
-                    </label>
-                    <input
-                      id="paycheck-date"
-                      type="date"
-                      value={paycheckDate}
-                      onChange={(e) => setPaycheckDate(e.target.value)}
-                      className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20 [color-scheme:dark]"
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full rounded-xl border border-emerald-500/40 bg-emerald-600/20 py-3.5 text-sm font-semibold text-emerald-300 transition hover:border-emerald-500/60 hover:bg-emerald-600/30 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 active:bg-emerald-600/40"
-                  >
-                    {editingPaycheckId ? "Save Paycheck" : "Add Paycheck"}
-                  </button>
-                </form>
-
-                {plannedPaychecks.length > 0 && (
-                  <div className="mt-5">
-                    <ul className="space-y-2">
-                      {[...plannedPaychecks]
-                        .sort((a, b) => a.payDate.localeCompare(b.payDate))
-                        .map((paycheck) => (
+                    <h3 className="mb-3 text-sm font-semibold text-slate-300">
+                      Active Recurring Paychecks
+                    </h3>
+                    {recurringPaychecks.length > 0 ? (
+                      <ul className="space-y-2">
+                        {recurringPaychecks.map((paycheck) => (
                           <li
                             key={paycheck.id}
                             className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm"
@@ -3566,7 +4281,7 @@ export default function Home() {
                                 {paycheck.name}
                               </p>
                               <p className="text-xs text-slate-500">
-                                {formatDueDate(paycheck.payDate)}
+                                {formatRecurringPaycheckSchedule(paycheck)}
                               </p>
                             </div>
                             <span className="font-semibold tabular-nums text-emerald-200">
@@ -3575,14 +4290,18 @@ export default function Home() {
                             <div className="flex shrink-0 gap-2">
                               <button
                                 type="button"
-                                onClick={() => startEditPaycheck(paycheck)}
+                                onClick={() =>
+                                  startEditRecurringPaycheck(paycheck)
+                                }
                                 className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-emerald-500/40 hover:text-emerald-300"
                               >
                                 Edit
                               </button>
                               <button
                                 type="button"
-                                onClick={() => removePaycheck(paycheck.id)}
+                                onClick={() =>
+                                  removeRecurringPaycheck(paycheck.id)
+                                }
                                 className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
                                 aria-label={`Remove ${paycheck.name}`}
                               >
@@ -3591,9 +4310,279 @@ export default function Home() {
                             </div>
                           </li>
                         ))}
-                    </ul>
+                      </ul>
+                    ) : (
+                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                        No recurring paychecks yet.
+                      </p>
+                    )}
                   </div>
-                )}
+                </div>
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                id="monthly-spending-plan"
+                title="Monthly Spending Plan"
+                subtitle="Track spending by category"
+                iconClassName="bg-violet-600/20 text-violet-400"
+                isOpen={sectionOpen.monthlySpendingPlan}
+                onToggle={() => toggleSection("monthlySpendingPlan")}
+                icon={
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-5 w-5"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 3v18h18" />
+                    <path d="M7 16l4-5 4 3 5-7" />
+                  </svg>
+                }
+              >
+                <div className="space-y-6">
+                  <form
+                    className="space-y-4"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      saveSpendingCategory();
+                    }}
+                  >
+                    <div>
+                      <label
+                        htmlFor="spending-category-name"
+                        className="mb-2 block text-sm font-medium text-slate-300"
+                      >
+                        Category Name
+                      </label>
+                      <input
+                        id="spending-category-name"
+                        type="text"
+                        placeholder="Example: Food"
+                        value={spendingCategoryName}
+                        onChange={(e) => setSpendingCategoryName(e.target.value)}
+                        className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="spending-category-budget"
+                        className="mb-2 block text-sm font-medium text-slate-300"
+                      >
+                        Monthly Budget
+                      </label>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4 text-slate-500">
+                          $
+                        </span>
+                        <input
+                          id="spending-category-budget"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          placeholder="0.00"
+                          value={spendingCategoryBudget}
+                          onChange={(e) =>
+                            setSpendingCategoryBudget(e.target.value)
+                          }
+                          className="block w-full rounded-xl border border-white/10 bg-white/5 py-3.5 pl-9 pr-4 text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="w-full rounded-xl border border-violet-500/40 bg-violet-600/20 py-3.5 text-sm font-semibold text-violet-300 transition hover:border-violet-500/60 hover:bg-violet-600/30 focus:outline-none focus:ring-2 focus:ring-violet-500/20 active:bg-violet-600/40"
+                    >
+                      {editingSpendingCategoryId
+                        ? "Save Category"
+                        : "Add Category"}
+                    </button>
+                  </form>
+
+                  <div className="space-y-4">
+                    {spendingCategories.map((category) => {
+                      const amountSpent = getCategoryAmountSpent(category);
+                      const amountRemaining =
+                        getCategoryAmountRemaining(category);
+                      const percentUsed = getCategoryPercentUsed(category);
+                      const transactionDraft =
+                        getSpendingTransactionDraft(category.id);
+
+                      return (
+                        <div
+                          key={category.id}
+                          className="rounded-xl border border-white/10 bg-white/[0.03] p-4"
+                        >
+                          <div className="mb-3 flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <h3 className="font-semibold text-white">
+                                {category.name}
+                              </h3>
+                              <p className="mt-1 text-xs text-slate-500">
+                                Budget: ${category.monthlyBudget.toLocaleString()}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  startEditSpendingCategory(category)
+                                }
+                                className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-violet-500/40 hover:text-violet-300"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  removeSpendingCategory(category.id)
+                                }
+                                className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                aria-label={`Remove ${category.name}`}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="mb-3 grid grid-cols-3 gap-2 text-center text-xs sm:text-sm">
+                            <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2 py-2">
+                              <p className="text-slate-500">Spent</p>
+                              <p className="mt-1 font-semibold tabular-nums text-violet-200">
+                                ${amountSpent.toLocaleString()}
+                              </p>
+                            </div>
+                            <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2 py-2">
+                              <p className="text-slate-500">Remaining</p>
+                              <p
+                                className={`mt-1 font-semibold tabular-nums ${
+                                  amountRemaining < 0
+                                    ? "text-red-300"
+                                    : "text-emerald-200"
+                                }`}
+                              >
+                                ${Math.max(0, amountRemaining).toLocaleString()}
+                              </p>
+                            </div>
+                            <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2 py-2">
+                              <p className="text-slate-500">Used</p>
+                              <p className="mt-1 font-semibold tabular-nums text-white">
+                                {percentUsed}%
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="mb-4">
+                            <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
+                              <div
+                                className={`h-full rounded-full transition-all ${getSpendingProgressBarColor(percentUsed)}`}
+                                style={{
+                                  width: `${Math.min(100, percentUsed)}%`,
+                                }}
+                              />
+                            </div>
+                          </div>
+
+                          {category.transactions.length > 0 ? (
+                            <ul className="mb-3 space-y-2">
+                              {category.transactions.map((transaction) => (
+                                <li
+                                  key={transaction.id}
+                                  className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"
+                                >
+                                  <span className="min-w-0 truncate text-slate-300">
+                                    {transaction.name}
+                                  </span>
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    <span className="font-semibold tabular-nums text-violet-200">
+                                      ${transaction.amount.toLocaleString()}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        removeSpendingTransaction(
+                                          category.id,
+                                          transaction.id,
+                                        )
+                                      }
+                                      className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                      aria-label={`Remove ${transaction.name}`}
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mb-3 text-xs text-slate-500">
+                              No transactions yet.
+                            </p>
+                          )}
+
+                          <form
+                            className="space-y-2"
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              addSpendingTransaction(category.id);
+                            }}
+                          >
+                            <p className="text-xs font-medium text-slate-400">
+                              Add Transaction
+                            </p>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_120px_auto]">
+                              <input
+                                type="text"
+                                placeholder="Store or description"
+                                value={transactionDraft.name}
+                                onChange={(e) =>
+                                  updateSpendingTransactionDraft(
+                                    category.id,
+                                    "name",
+                                    e.target.value,
+                                  )
+                                }
+                                className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
+                              />
+                              <div className="relative">
+                                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-sm text-slate-500">
+                                  $
+                                </span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  placeholder="0.00"
+                                  value={transactionDraft.amount}
+                                  onChange={(e) =>
+                                    updateSpendingTransactionDraft(
+                                      category.id,
+                                      "amount",
+                                      e.target.value,
+                                    )
+                                  }
+                                  className="block w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-7 pr-3 text-sm text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
+                                />
+                              </div>
+                              <button
+                                type="submit"
+                                className="rounded-xl border border-violet-500/40 bg-violet-600/20 px-4 py-2.5 text-sm font-semibold text-violet-300 transition hover:border-violet-500/60 hover:bg-violet-600/30 focus:outline-none focus:ring-2 focus:ring-violet-500/20 active:bg-violet-600/40"
+                              >
+                                Add
+                              </button>
+                            </div>
+                          </form>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </CollapsibleSection>
 
               <CollapsibleSection
@@ -4309,8 +5298,8 @@ export default function Home() {
 
               <CollapsibleSection
                 id="spending-decision"
-                title="Spending Decision"
-                subtitle="Your personal spending coach"
+                title="Financial Confidence Assistant"
+                subtitle="Know before you buy"
                 iconClassName="bg-blue-600/20 text-blue-400"
                 isOpen={sectionOpen.spendingDecision}
                 onToggle={() => toggleSection("spendingDecision")}
