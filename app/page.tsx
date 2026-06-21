@@ -1120,8 +1120,84 @@ function getCategoryPercentUsed(category: SpendingCategory): number {
 
 function getSpendingProgressBarColor(percentUsed: number): string {
   if (percentUsed >= 100) return "bg-red-500";
-  if (percentUsed >= 80) return "bg-yellow-500";
+  if (percentUsed >= 75) return "bg-yellow-500";
   return "bg-emerald-500";
+}
+
+type SpendingCategoryStatus = "On Track" | "Watch" | "Over Budget";
+
+function getSpendingCategoryStatus(
+  percentUsed: number,
+): SpendingCategoryStatus {
+  if (percentUsed >= 100) return "Over Budget";
+  if (percentUsed >= 75) return "Watch";
+  return "On Track";
+}
+
+const spendingCategoryStatusStyles: Record<
+  SpendingCategoryStatus,
+  { badge: string; badgeText: string; cardBorder: string }
+> = {
+  "On Track": {
+    badge: "bg-emerald-500/20",
+    badgeText: "text-emerald-300",
+    cardBorder: "border-emerald-500/20",
+  },
+  Watch: {
+    badge: "bg-yellow-500/20",
+    badgeText: "text-yellow-300",
+    cardBorder: "border-yellow-500/20",
+  },
+  "Over Budget": {
+    badge: "bg-red-500/20",
+    badgeText: "text-red-300",
+    cardBorder: "border-red-500/20",
+  },
+};
+
+function getTotalMonthlySpendingBudget(categories: SpendingCategory[]): number {
+  return categories.reduce((sum, category) => sum + category.monthlyBudget, 0);
+}
+
+function getTotalMonthlySpendingSpent(categories: SpendingCategory[]): number {
+  return categories.reduce(
+    (sum, category) => sum + getCategoryAmountSpent(category),
+    0,
+  );
+}
+
+function getTotalMonthlySpendingRemaining(
+  categories: SpendingCategory[],
+): number {
+  return (
+    getTotalMonthlySpendingBudget(categories) -
+    getTotalMonthlySpendingSpent(categories)
+  );
+}
+
+function isSpendingCategoryActive(category: SpendingCategory): boolean {
+  return category.monthlyBudget > 0 || category.transactions.length > 0;
+}
+
+function getVisibleSpendingCategories(
+  categories: SpendingCategory[],
+): SpendingCategory[] {
+  return categories.filter(isSpendingCategoryActive);
+}
+
+function getActiveSpendingCategoryCount(categories: SpendingCategory[]): number {
+  return getVisibleSpendingCategories(categories).length;
+}
+
+function getSpendingProgressBarWidth(
+  amountSpent: number,
+  monthlyBudget: number,
+): number {
+  if (monthlyBudget > 0) {
+    return Math.min(100, (amountSpent / monthlyBudget) * 100);
+  }
+
+  return amountSpent > 0 ? 100 : 0;
 }
 
 type TimelineEventType = "Income" | "Expense";
@@ -2044,6 +2120,12 @@ export default function Home() {
   const [spendingTransactionDrafts, setSpendingTransactionDrafts] = useState<
     Record<string, { name: string; amount: string }>
   >({});
+  const [spendingCategoryExpanded, setSpendingCategoryExpanded] = useState<
+    Record<string, boolean>
+  >({});
+  const [spendingTransactionFormOpen, setSpendingTransactionFormOpen] =
+    useState<Record<string, boolean>>({});
+  const spendingCategoryFormRef = useRef<HTMLFormElement>(null);
   const [checkingBalance, setCheckingBalance] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<
     "all" | "income" | "expense"
@@ -2599,6 +2681,8 @@ export default function Home() {
     setSpendingCategoryBudget("");
     setEditingSpendingCategoryId(null);
     setSpendingTransactionDrafts({});
+    setSpendingCategoryExpanded({});
+    setSpendingTransactionFormOpen({});
     setCheckingBalance("");
     setProfile(DEFAULT_PROFILE);
     setProfileMessage("");
@@ -2937,6 +3021,16 @@ export default function Home() {
       delete next[id];
       return next;
     });
+    setSpendingCategoryExpanded((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setSpendingTransactionFormOpen((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     if (editingSpendingCategoryId === id) {
       resetSpendingCategoryFormFields();
     }
@@ -3002,6 +3096,40 @@ export default function Home() {
           : category,
       ),
     );
+  };
+
+  const isSpendingCategoryExpanded = (category: SpendingCategory): boolean => {
+    if (category.id in spendingCategoryExpanded) {
+      return spendingCategoryExpanded[category.id];
+    }
+
+    return category.transactions.length > 0;
+  };
+
+  const toggleSpendingCategoryExpanded = (category: SpendingCategory) => {
+    setSpendingCategoryExpanded((prev) => ({
+      ...prev,
+      [category.id]: !isSpendingCategoryExpanded(category),
+    }));
+  };
+
+  const openSpendingTransactionForm = (category: SpendingCategory) => {
+    setSpendingCategoryExpanded((prev) => ({ ...prev, [category.id]: true }));
+    setSpendingTransactionFormOpen((prev) => ({ ...prev, [category.id]: true }));
+
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`spending-transaction-name-${category.id}`)
+        ?.focus();
+    });
+  };
+
+  const focusSpendingCategoryForm = () => {
+    spendingCategoryFormRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+    document.getElementById("spending-category-name")?.focus();
   };
 
   const submitSpendingDecision = () => {
@@ -3352,6 +3480,15 @@ export default function Home() {
     ? cashFlowProjection.startingBalance + timelineTotals.income
     : 0;
   const timelineRemainingCash = cashFlowProjection?.endingBalance ?? 0;
+
+  const totalSpendingBudget = getTotalMonthlySpendingBudget(spendingCategories);
+  const totalSpendingSpent = getTotalMonthlySpendingSpent(spendingCategories);
+  const totalSpendingRemaining =
+    getTotalMonthlySpendingRemaining(spendingCategories);
+  const visibleSpendingCategories =
+    getVisibleSpendingCategories(spendingCategories);
+  const activeSpendingCategoryCount =
+    getActiveSpendingCategoryCount(spendingCategories);
 
   const visibleTimelineRows =
     cashFlowProjection?.rows.filter(({ event }) => {
@@ -4345,13 +4482,104 @@ export default function Home() {
                 }
               >
                 <div className="space-y-6">
+                  <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-4 py-4">
+                      <dt className="text-xs font-medium uppercase tracking-wide text-violet-300 sm:text-sm">
+                        Total Monthly Budget
+                      </dt>
+                      <dd className="mt-2 text-xl font-bold tabular-nums text-white sm:text-2xl">
+                        ${totalSpendingBudget.toLocaleString()}
+                      </dd>
+                      <dd className="mt-1 text-xs text-slate-500">
+                        Across all categories
+                      </dd>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
+                        Total Spent
+                      </dt>
+                      <dd className="mt-2 text-xl font-bold tabular-nums text-violet-200 sm:text-2xl">
+                        ${totalSpendingSpent.toLocaleString()}
+                      </dd>
+                      <dd className="mt-1 text-xs text-slate-500">
+                        Recorded this month
+                      </dd>
+                    </div>
+                    <div
+                      className={`rounded-xl border px-4 py-4 ${
+                        totalSpendingRemaining >= 0
+                          ? "border-emerald-500/20 bg-emerald-500/5"
+                          : "border-red-500/20 bg-red-500/5"
+                      }`}
+                    >
+                      <dt
+                        className={`text-xs font-medium uppercase tracking-wide sm:text-sm ${
+                          totalSpendingRemaining >= 0
+                            ? "text-emerald-300"
+                            : "text-red-300"
+                        }`}
+                      >
+                        Total Remaining
+                      </dt>
+                      <dd
+                        className={`mt-2 text-xl font-bold tabular-nums sm:text-2xl ${
+                          totalSpendingRemaining >= 0
+                            ? "text-emerald-200"
+                            : "text-red-300"
+                        }`}
+                      >
+                        ${Math.max(0, totalSpendingRemaining).toLocaleString()}
+                      </dd>
+                      <dd className="mt-1 text-xs text-slate-500">
+                        Budget minus spent
+                      </dd>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
+                        Active Categories
+                      </dt>
+                      <dd className="mt-2 text-xl font-bold tabular-nums text-white sm:text-2xl">
+                        {activeSpendingCategoryCount}
+                      </dd>
+                      <dd className="mt-1 text-xs text-slate-500">
+                        With a budget or spending
+                      </dd>
+                    </div>
+                  </dl>
+
+                  {spendingCategories.length === 0 ? (
+                    <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-8 text-center sm:px-6">
+                      <p className="text-base font-semibold text-white">
+                        No spending categories yet.
+                      </p>
+                      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-slate-400">
+                        Create categories like Food, Gas, Shopping,
+                        Entertainment, or Subscriptions to track your monthly
+                        spending.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={focusSpendingCategoryForm}
+                        className="mt-5 rounded-xl border border-violet-500/40 bg-violet-600/20 px-6 py-3 text-sm font-semibold text-violet-300 transition hover:border-violet-500/60 hover:bg-violet-600/30 focus:outline-none focus:ring-2 focus:ring-violet-500/20 active:bg-violet-600/40"
+                      >
+                        Add First Category
+                      </button>
+                    </div>
+                  ) : null}
+
                   <form
-                    className="space-y-4"
+                    ref={spendingCategoryFormRef}
+                    className="space-y-4 rounded-xl border border-white/10 bg-white/[0.03] p-4 sm:p-5"
                     onSubmit={(e) => {
                       e.preventDefault();
                       saveSpendingCategory();
                     }}
                   >
+                    <h3 className="text-sm font-semibold text-slate-300">
+                      {editingSpendingCategoryId
+                        ? "Edit Category"
+                        : "Add Category"}
+                    </h3>
                     <div>
                       <label
                         htmlFor="spending-category-name"
@@ -4405,183 +4633,273 @@ export default function Home() {
                     </button>
                   </form>
 
-                  <div className="space-y-4">
-                    {spendingCategories.map((category) => {
-                      const amountSpent = getCategoryAmountSpent(category);
-                      const amountRemaining =
-                        getCategoryAmountRemaining(category);
-                      const percentUsed = getCategoryPercentUsed(category);
-                      const transactionDraft =
-                        getSpendingTransactionDraft(category.id);
+                  {spendingCategories.length > 0 ? (
+                    <div className="space-y-4">
+                      <h3 className="text-sm font-semibold text-slate-300">
+                        Your Categories
+                      </h3>
+                      {visibleSpendingCategories.length === 0 ? (
+                        <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
+                          Categories appear here once you set a budget or add
+                          spending.
+                        </p>
+                      ) : null}
+                      {visibleSpendingCategories.map((category) => {
+                        const amountSpent = getCategoryAmountSpent(category);
+                        const amountRemaining =
+                          getCategoryAmountRemaining(category);
+                        const percentUsed = getCategoryPercentUsed(category);
+                        const progressBarWidth = getSpendingProgressBarWidth(
+                          amountSpent,
+                          category.monthlyBudget,
+                        );
+                        const categoryStatus =
+                          getSpendingCategoryStatus(percentUsed);
+                        const statusStyles =
+                          spendingCategoryStatusStyles[categoryStatus];
+                        const transactionDraft =
+                          getSpendingTransactionDraft(category.id);
+                        const isExpanded = isSpendingCategoryExpanded(category);
+                        const isTransactionFormOpen =
+                          spendingTransactionFormOpen[category.id] === true;
 
-                      return (
-                        <div
-                          key={category.id}
-                          className="rounded-xl border border-white/10 bg-white/[0.03] p-4"
-                        >
-                          <div className="mb-3 flex items-start justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <h3 className="font-semibold text-white">
-                                {category.name}
-                              </h3>
-                              <p className="mt-1 text-xs text-slate-500">
-                                Budget: ${category.monthlyBudget.toLocaleString()}
-                              </p>
-                            </div>
-                            <div className="flex shrink-0 gap-2">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  startEditSpendingCategory(category)
-                                }
-                                className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-violet-500/40 hover:text-violet-300"
-                              >
-                                Edit
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  removeSpendingCategory(category.id)
-                                }
-                                className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
-                                aria-label={`Remove ${category.name}`}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="mb-3 grid grid-cols-3 gap-2 text-center text-xs sm:text-sm">
-                            <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2 py-2">
-                              <p className="text-slate-500">Spent</p>
-                              <p className="mt-1 font-semibold tabular-nums text-violet-200">
-                                ${amountSpent.toLocaleString()}
-                              </p>
-                            </div>
-                            <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2 py-2">
-                              <p className="text-slate-500">Remaining</p>
-                              <p
-                                className={`mt-1 font-semibold tabular-nums ${
-                                  amountRemaining < 0
-                                    ? "text-red-300"
-                                    : "text-emerald-200"
-                                }`}
-                              >
-                                ${Math.max(0, amountRemaining).toLocaleString()}
-                              </p>
-                            </div>
-                            <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2 py-2">
-                              <p className="text-slate-500">Used</p>
-                              <p className="mt-1 font-semibold tabular-nums text-white">
-                                {percentUsed}%
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="mb-4">
-                            <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
-                              <div
-                                className={`h-full rounded-full transition-all ${getSpendingProgressBarColor(percentUsed)}`}
-                                style={{
-                                  width: `${Math.min(100, percentUsed)}%`,
-                                }}
-                              />
-                            </div>
-                          </div>
-
-                          {category.transactions.length > 0 ? (
-                            <ul className="mb-3 space-y-2">
-                              {category.transactions.map((transaction) => (
-                                <li
-                                  key={transaction.id}
-                                  className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"
-                                >
-                                  <span className="min-w-0 truncate text-slate-300">
-                                    {transaction.name}
-                                  </span>
-                                  <div className="flex shrink-0 items-center gap-2">
-                                    <span className="font-semibold tabular-nums text-violet-200">
-                                      ${transaction.amount.toLocaleString()}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        removeSpendingTransaction(
-                                          category.id,
-                                          transaction.id,
-                                        )
-                                      }
-                                      className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
-                                      aria-label={`Remove ${transaction.name}`}
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                </li>
-                              ))}
-                            </ul>
-                          ) : (
-                            <p className="mb-3 text-xs text-slate-500">
-                              No transactions yet.
-                            </p>
-                          )}
-
-                          <form
-                            className="space-y-2"
-                            onSubmit={(e) => {
-                              e.preventDefault();
-                              addSpendingTransaction(category.id);
-                            }}
+                        return (
+                          <div
+                            key={category.id}
+                            className={`rounded-xl border bg-white/[0.03] p-4 sm:p-5 ${statusStyles.cardBorder}`}
                           >
-                            <p className="text-xs font-medium text-slate-400">
-                              Add Transaction
-                            </p>
-                            <div className="grid gap-2 sm:grid-cols-[1fr_120px_auto]">
-                              <input
-                                type="text"
-                                placeholder="Store or description"
-                                value={transactionDraft.name}
-                                onChange={(e) =>
-                                  updateSpendingTransactionDraft(
-                                    category.id,
-                                    "name",
-                                    e.target.value,
-                                  )
-                                }
-                                className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
-                              />
-                              <div className="relative">
-                                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-sm text-slate-500">
-                                  $
-                                </span>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  placeholder="0.00"
-                                  value={transactionDraft.amount}
-                                  onChange={(e) =>
-                                    updateSpendingTransactionDraft(
-                                      category.id,
-                                      "amount",
-                                      e.target.value,
-                                    )
-                                  }
-                                  className="block w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-7 pr-3 text-sm text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
-                                />
-                              </div>
+                            <div className="flex items-start gap-3">
                               <button
-                                type="submit"
-                                className="rounded-xl border border-violet-500/40 bg-violet-600/20 px-4 py-2.5 text-sm font-semibold text-violet-300 transition hover:border-violet-500/60 hover:bg-violet-600/30 focus:outline-none focus:ring-2 focus:ring-violet-500/20 active:bg-violet-600/40"
+                                type="button"
+                                onClick={() =>
+                                  toggleSpendingCategoryExpanded(category)
+                                }
+                                className="min-w-0 flex-1 text-left"
+                                aria-expanded={isExpanded}
                               >
-                                Add
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${
+                                      isExpanded ? "rotate-0" : "-rotate-90"
+                                    }`}
+                                    aria-hidden="true"
+                                  >
+                                    <path d="M6 9l6 6 6-6" />
+                                  </svg>
+                                  <h4 className="font-semibold text-white">
+                                    {category.name}
+                                  </h4>
+                                  <span
+                                    className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${statusStyles.badge} ${statusStyles.badgeText}`}
+                                  >
+                                    {categoryStatus}
+                                  </span>
+                                </div>
+                                <p className="mt-2 text-sm font-semibold tabular-nums text-slate-200">
+                                  ${amountSpent.toLocaleString()} / $
+                                  {category.monthlyBudget.toLocaleString()}
+                                </p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  {percentUsed}% Used
+                                </p>
+                                <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-white/10">
+                                  <div
+                                    className={`h-full rounded-full transition-all ${getSpendingProgressBarColor(percentUsed)}`}
+                                    style={{ width: `${progressBarWidth}%` }}
+                                  />
+                                </div>
                               </button>
+
+                              <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-start">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    openSpendingTransactionForm(category)
+                                  }
+                                  className="rounded-lg border border-violet-500/30 bg-violet-600/15 px-2.5 py-1.5 text-xs font-medium text-violet-300 transition hover:border-violet-500/50 hover:bg-violet-600/25"
+                                >
+                                  Add Transaction
+                                </button>
+                                <div className="flex gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      startEditSpendingCategory(category)
+                                    }
+                                    className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-violet-500/40 hover:text-violet-300"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      removeSpendingCategory(category.id)
+                                    }
+                                    className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                    aria-label={`Remove ${category.name}`}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                          </form>
-                        </div>
-                      );
-                    })}
-                  </div>
+
+                            {isExpanded ? (
+                              <div className="mt-4 border-t border-white/10 pt-4">
+                                <dl className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                  <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2.5">
+                                    <dt className="text-xs text-slate-500">
+                                      Budget
+                                    </dt>
+                                    <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                                      $
+                                      {category.monthlyBudget.toLocaleString()}
+                                    </dd>
+                                  </div>
+                                  <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2.5">
+                                    <dt className="text-xs text-slate-500">
+                                      Spent
+                                    </dt>
+                                    <dd className="mt-1 text-sm font-semibold tabular-nums text-violet-200">
+                                      ${amountSpent.toLocaleString()}
+                                    </dd>
+                                  </div>
+                                  <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2.5">
+                                    <dt className="text-xs text-slate-500">
+                                      Remaining
+                                    </dt>
+                                    <dd
+                                      className={`mt-1 text-sm font-semibold tabular-nums ${
+                                        amountRemaining < 0
+                                          ? "text-red-300"
+                                          : "text-emerald-200"
+                                      }`}
+                                    >
+                                      $
+                                      {Math.max(
+                                        0,
+                                        amountRemaining,
+                                      ).toLocaleString()}
+                                    </dd>
+                                  </div>
+                                  <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2.5">
+                                    <dt className="text-xs text-slate-500">
+                                      Percent Used
+                                    </dt>
+                                    <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                                      {percentUsed}%
+                                    </dd>
+                                  </div>
+                                </dl>
+
+                                <h5 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                  Transactions
+                                </h5>
+                                {category.transactions.length > 0 ? (
+                                  <ul className="mb-4 divide-y divide-white/10 rounded-lg border border-white/10 bg-white/[0.02]">
+                                    {category.transactions.map((transaction) => (
+                                      <li
+                                        key={transaction.id}
+                                        className="flex items-center justify-between gap-3 px-3 py-3 text-sm sm:px-4"
+                                      >
+                                        <span className="min-w-0 flex-1 truncate font-medium text-slate-200">
+                                          {transaction.name}
+                                        </span>
+                                        <span className="shrink-0 font-semibold tabular-nums text-violet-200">
+                                          $
+                                          {transaction.amount.toLocaleString()}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            removeSpendingTransaction(
+                                              category.id,
+                                              transaction.id,
+                                            )
+                                          }
+                                          className="shrink-0 rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                          aria-label={`Remove ${transaction.name}`}
+                                        >
+                                          Delete
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <p className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-3 text-xs text-slate-500">
+                                    No transactions yet.
+                                  </p>
+                                )}
+
+                                {isTransactionFormOpen ? (
+                                  <form
+                                    className="space-y-2"
+                                    onSubmit={(e) => {
+                                      e.preventDefault();
+                                      addSpendingTransaction(category.id);
+                                    }}
+                                  >
+                                    <p className="text-xs font-medium text-slate-400">
+                                      Add Transaction
+                                    </p>
+                                    <div className="grid gap-2 sm:grid-cols-[1fr_120px_auto]">
+                                      <input
+                                        id={`spending-transaction-name-${category.id}`}
+                                        type="text"
+                                        placeholder="Store or description"
+                                        value={transactionDraft.name}
+                                        onChange={(e) =>
+                                          updateSpendingTransactionDraft(
+                                            category.id,
+                                            "name",
+                                            e.target.value,
+                                          )
+                                        }
+                                        className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
+                                      />
+                                      <div className="relative">
+                                        <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-sm text-slate-500">
+                                          $
+                                        </span>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="0.01"
+                                          placeholder="0.00"
+                                          value={transactionDraft.amount}
+                                          onChange={(e) =>
+                                            updateSpendingTransactionDraft(
+                                              category.id,
+                                              "amount",
+                                              e.target.value,
+                                            )
+                                          }
+                                          className="block w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-7 pr-3 text-sm text-white placeholder:text-slate-600 transition focus:border-violet-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-violet-500/20"
+                                        />
+                                      </div>
+                                      <button
+                                        type="submit"
+                                        className="rounded-xl border border-violet-500/40 bg-violet-600/20 px-4 py-2.5 text-sm font-semibold text-violet-300 transition hover:border-violet-500/60 hover:bg-violet-600/30 focus:outline-none focus:ring-2 focus:ring-violet-500/20 active:bg-violet-600/40"
+                                      >
+                                        Add
+                                      </button>
+                                    </div>
+                                  </form>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
               </CollapsibleSection>
 
