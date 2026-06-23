@@ -4295,7 +4295,7 @@ export default function Home() {
             </h1>
 
             <p className="mt-6 max-w-lg text-lg leading-relaxed text-slate-400 sm:text-xl lg:mx-0 lg:max-w-md">
-              Know what you can safely spend before you buy.
+              Know before you buy.
             </p>
 
             <p className="mt-4 max-w-md text-sm leading-relaxed text-slate-500 lg:mx-0">
@@ -4306,8 +4306,8 @@ export default function Home() {
             {/* Stats */}
             <dl className="mt-10 grid grid-cols-1 gap-4 border-t border-white/10 pt-8 sm:grid-cols-3 sm:gap-6">
               {[
-                { value: "1 Minute", label: "Setup" },
-                { value: "Stored Locally", label: "Private by design" },
+                { value: "Quick", label: "Setup" },
+                { value: "Private", label: "Stored on your device" },
                 { value: "Real-Time", label: "Decisions" },
               ].map((stat) => (
                 <div key={stat.label}>
@@ -7126,7 +7126,7 @@ export default function Home() {
 
       <footer className="relative z-10 border-t border-white/10 py-8">
         <p className="text-center text-xs text-slate-600">
-          © {new Date().getFullYear()} Financial Confidence. Built for smarter
+          © Financial Confidence. Built for smarter
           money decisions — stored locally on your device.
         </p>
       </footer>
