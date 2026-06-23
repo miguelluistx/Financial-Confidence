@@ -97,6 +97,33 @@ const DEFAULT_PROFILE: UserProfile = {
   email: "",
 };
 
+const TOUCH_TARGET_BUTTON_CLASS =
+  "inline-flex min-h-[44px] items-center justify-center rounded-lg border px-3 py-2 text-xs";
+
+function confirmAction(message: string): boolean {
+  return window.confirm(message);
+}
+
+function getTimelineDeleteConfirmMessage(
+  event: TimelineEvent,
+  source: TimelineEventSource,
+): string {
+  switch (source.kind) {
+    case "bill":
+      return `Delete "${event.name}" from your bills and timeline?`;
+    case "paycheck":
+      return `Delete "${event.name}" from your paychecks and timeline?`;
+    case "recurring":
+      return `Skip "${event.name}" on ${formatDueDate(source.occurrenceDate)}? Future bill dates will continue.`;
+    case "recurring-paycheck":
+      return `Skip "${event.name}" on ${formatDueDate(source.occurrenceDate)}? Future paychecks will continue.`;
+    case "planned-purchase":
+      return `Remove planned purchase "${event.name}" from your timeline?`;
+    case "manual":
+      return `Delete "${event.name}" from your timeline?`;
+  }
+}
+
 function getGoalProgressPercent(goal: SavingsGoal): number {
   if (goal.targetAmount <= 0) return 0;
 
@@ -1724,11 +1751,21 @@ function getDashboardCashFlowMessage(
   rows: FinancialTimelineResult["rows"] | undefined,
   todayISO: string,
   shortfallCause: ShortfallCause,
+  hasSetupData: boolean,
 ): {
-  status: "Healthy" | "Shortfall Expected";
+  status: "Healthy" | "Shortfall Expected" | "Setup Needed";
   headline: string;
   detail: string;
 } {
+  if (!hasSetupData) {
+    return {
+      status: "Setup Needed",
+      headline: "Let's get you set up.",
+      detail:
+        "Add your checking balance, paychecks, and bills below to unlock your cash flow outlook.",
+    };
+  }
+
   if (!hasShortfall) {
     return {
       status: "Healthy",
@@ -1829,6 +1866,77 @@ type PersistedAppData = {
 };
 
 const STORAGE_KEY = "financial-confidence-data";
+const LANGUAGE_STORAGE_KEY = "financial-confidence-language";
+
+type AppLanguage = "en" | "es";
+
+const APP_LABELS = {
+  en: {
+    dashboard: "Dashboard",
+    bills: "Bills",
+    paychecks: "Paychecks",
+    monthlySpendingPlan: "Monthly Spending Plan",
+    cashFlowTimeline: "Cash Flow Timeline",
+    goalsAndPlanning: "Goals & Planning",
+    financialConfidenceAssistant: "Financial Confidence Assistant",
+    currentBalance: "Current Balance",
+    nextPaycheck: "Next Paycheck",
+    safeToSpend: "Safe To Spend",
+    savingsGoal: "Savings Goal",
+    addBill: "Add Bill",
+    addPaycheck: "Add Paycheck",
+    addCategory: "Add Category",
+    addGoal: "Add Goal",
+    knowBeforeYouBuy: "Know before you buy",
+    language: "Language",
+    selectLanguage: "Select Language",
+    english: "English",
+    spanish: "Español",
+  },
+  es: {
+    dashboard: "Panel",
+    bills: "Facturas",
+    paychecks: "Pagos",
+    monthlySpendingPlan: "Plan de Gastos Mensual",
+    cashFlowTimeline: "Línea de Tiempo de Flujo de Efectivo",
+    goalsAndPlanning: "Metas y Planificación",
+    financialConfidenceAssistant: "Asistente de Confianza Financiera",
+    currentBalance: "Saldo Actual",
+    nextPaycheck: "Próximo Pago",
+    safeToSpend: "Seguro para Gastar",
+    savingsGoal: "Meta de Ahorro",
+    addBill: "Agregar Factura",
+    addPaycheck: "Agregar Pago",
+    addCategory: "Agregar Categoría",
+    addGoal: "Agregar Meta",
+    knowBeforeYouBuy: "Sabe antes de comprar",
+    language: "Idioma",
+    selectLanguage: "Seleccionar idioma",
+    english: "English",
+    spanish: "Español",
+  },
+} as const;
+
+function loadLanguage(): AppLanguage {
+  if (typeof window === "undefined") return "en";
+
+  try {
+    const raw = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    return raw === "es" ? "es" : "en";
+  } catch {
+    return "en";
+  }
+}
+
+function saveLanguage(language: AppLanguage): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+  } catch {
+    // Ignore storage quota or privacy mode errors.
+  }
+}
 
 function loadPersistedData(): PersistedAppData | null {
   if (typeof window === "undefined") return null;
@@ -1959,12 +2067,33 @@ const confidenceScoreStyles: Record<
 };
 
 const dashboardStatusStyles: Record<
-  "Healthy" | "Tight" | "Shortfall Expected",
-  { badgeText: string }
+  "Healthy" | "Tight" | "Shortfall Expected" | "Setup Needed",
+  { badgeText: string; border: string; bg: string; detail: string }
 > = {
-  Healthy: { badgeText: "text-emerald-300" },
-  Tight: { badgeText: "text-yellow-300" },
-  "Shortfall Expected": { badgeText: "text-red-300" },
+  Healthy: {
+    badgeText: "text-emerald-300",
+    border: "border-emerald-500/20",
+    bg: "bg-emerald-500/10",
+    detail: "text-emerald-200",
+  },
+  Tight: {
+    badgeText: "text-yellow-300",
+    border: "border-yellow-500/20",
+    bg: "bg-yellow-500/10",
+    detail: "text-yellow-200",
+  },
+  "Shortfall Expected": {
+    badgeText: "text-red-300",
+    border: "border-red-500/30",
+    bg: "bg-red-500/10",
+    detail: "text-red-200",
+  },
+  "Setup Needed": {
+    badgeText: "text-blue-300",
+    border: "border-blue-500/20",
+    bg: "bg-blue-500/10",
+    detail: "text-blue-200",
+  },
 };
 
 type SectionKey =
@@ -1976,7 +2105,7 @@ type SectionKey =
   | "goalsAndPlanning"
   | "spendingDecision";
 
-type ProfileModal = "account" | "settings" | null;
+type ProfileModal = "account" | "settings" | "language" | null;
 
 type ProfileMenuPlacement = "bottom" | "top";
 
@@ -2141,6 +2270,7 @@ export default function Home() {
     spendingDecision: false,
   });
   const [isHydrated, setIsHydrated] = useState(false);
+  const [language, setLanguage] = useState<AppLanguage>("en");
   const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [profileModal, setProfileModal] = useState<ProfileModal>(null);
@@ -2171,12 +2301,55 @@ export default function Home() {
   const [editTimelineDate, setEditTimelineDate] = useState("");
   const [editTimelineType, setEditTimelineType] =
     useState<TimelineEventType>("Expense");
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const actionMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const showActionMessage = (message: string) => {
+    if (actionMessageTimeoutRef.current) {
+      clearTimeout(actionMessageTimeoutRef.current);
+    }
+
+    setActionMessage(message);
+    actionMessageTimeoutRef.current = setTimeout(() => {
+      setActionMessage(null);
+    }, 3500);
+  };
+
+  const openAppSection = (key: SectionKey) => {
+    setSectionOpen((prev) => ({ ...prev, [key]: true }));
+
+    const sectionIds: Record<SectionKey, string> = {
+      dashboardSummary: "dashboard-summary",
+      bills: "bills",
+      paychecks: "paychecks",
+      monthlySpendingPlan: "monthly-spending-plan",
+      cashFlowTimeline: "cash-flow-timeline",
+      goalsAndPlanning: "goals-and-planning",
+      spendingDecision: "financial-confidence-assistant",
+    };
+
+    requestAnimationFrame(() => {
+      document
+        .getElementById(sectionIds[key])
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
 
   const toggleSection = (key: SectionKey) => {
     setSectionOpen((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   const profileDisplayName = profile.name.trim() || "Account";
+  const labels = APP_LABELS[language];
+
+  const selectLanguage = (nextLanguage: AppLanguage) => {
+    setLanguage(nextLanguage);
+    saveLanguage(nextLanguage);
+    setProfileModal(null);
+    setProfileMenuOpen(false);
+  };
 
   const getPersistedSnapshot = (): PersistedAppData => {
     const primaryGoal = getPrimarySavingsGoal(savingsGoals);
@@ -2299,6 +2472,14 @@ export default function Home() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [profileMenuOpen]);
 
+  useEffect(() => {
+    return () => {
+      if (actionMessageTimeoutRef.current) {
+        clearTimeout(actionMessageTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const totalUpcomingBills = plannedBills.reduce(
     (sum, bill) => sum + bill.amount,
     0,
@@ -2314,6 +2495,13 @@ export default function Home() {
     recurringPaychecks.length > 0 ||
     purchaseAmount !== "" ||
     spendingDecisionResult !== null;
+
+  const hasCoreSetupData =
+    checkingBalance !== "" ||
+    plannedBills.length > 0 ||
+    recurringBills.length > 0 ||
+    plannedPaychecks.length > 0 ||
+    recurringPaychecks.length > 0;
 
   const timelineHorizonEnd = getSafeToSpendHorizonEnd(
     plannedPaychecks,
@@ -2338,6 +2526,8 @@ export default function Home() {
   const cashFlowProjection = financialCalculation;
 
   useEffect(() => {
+    setLanguage(loadLanguage());
+
     const saved = loadPersistedData();
     if (saved) {
       const legacySaved = saved as PersistedAppData & {
@@ -2589,13 +2779,28 @@ export default function Home() {
     }
 
     cancelEditGoal();
+    showActionMessage(
+      editingGoalId ? "Goal updated." : "Goal added.",
+    );
   };
 
   const deleteGoal = (goalId: string) => {
-    setSavingsGoals((prev) => prev.filter((goal) => goal.id !== goalId));
+    const goal = savingsGoals.find((item) => item.id === goalId);
+    if (!goal) return;
+
+    if (
+      !confirmAction(
+        `Delete "${formatGoalName(goal.name)}"? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+
+    setSavingsGoals((prev) => prev.filter((item) => item.id !== goalId));
     if (editingGoalId === goalId) {
       cancelEditGoal();
     }
+    showActionMessage(`Deleted ${formatGoalName(goal.name)}.`);
   };
 
   const setPrimaryGoal = (goalId: string) => {
@@ -2624,6 +2829,7 @@ export default function Home() {
     link.click();
     URL.revokeObjectURL(url);
     setProfileMenuOpen(false);
+    showActionMessage("Backup downloaded to your device.");
   };
 
   const resetAllData = () => {
@@ -2688,6 +2894,7 @@ export default function Home() {
     setProfileMessage("");
     setProfileMenuOpen(false);
     setProfileModal(null);
+    showActionMessage("All data reset.");
   };
 
   const resetBillFormFields = () => {
@@ -2728,6 +2935,7 @@ export default function Home() {
     }
 
     resetBillFormFields();
+    showActionMessage(editingBillId ? "Bill updated." : "Bill added.");
   };
 
   const saveRecurringBill = () => {
@@ -2793,6 +3001,11 @@ export default function Home() {
     }
 
     resetBillFormFields();
+    showActionMessage(
+      editingRecurringBillId
+        ? "Recurring bill updated."
+        : "Recurring bill added.",
+    );
   };
 
   const saveBill = () => {
@@ -2812,10 +3025,26 @@ export default function Home() {
     setBillDueDate(bill.dueDate);
   };
 
-  const removeBill = (id: string) => {
-    setPlannedBills((prev) => prev.filter((bill) => bill.id !== id));
+  const removeBill = (id: string, options?: { skipConfirm?: boolean }) => {
+    const bill = plannedBills.find((item) => item.id === id);
+    if (!bill) return;
+
+    if (
+      !options?.skipConfirm &&
+      !confirmAction(
+        `Delete "${bill.name}"? This removes it from your bills and timeline.`,
+      )
+    ) {
+      return;
+    }
+
+    setPlannedBills((prev) => prev.filter((item) => item.id !== id));
     if (editingBillId === id) {
       resetBillFormFields();
+    }
+
+    if (!options?.skipConfirm) {
+      showActionMessage(`Deleted ${bill.name}.`);
     }
   };
 
@@ -2836,10 +3065,22 @@ export default function Home() {
   };
 
   const removeRecurringBill = (id: string) => {
-    setRecurringBills((prev) => prev.filter((bill) => bill.id !== id));
+    const bill = recurringBills.find((item) => item.id === id);
+    if (!bill) return;
+
+    if (
+      !confirmAction(
+        `Delete recurring bill "${bill.name}"? This removes all future occurrences.`,
+      )
+    ) {
+      return;
+    }
+
+    setRecurringBills((prev) => prev.filter((item) => item.id !== id));
     if (editingRecurringBillId === id) {
       resetBillFormFields();
     }
+    showActionMessage(`Deleted ${bill.name}.`);
   };
 
   const resetPaycheckFormFields = () => {
@@ -2882,6 +3123,9 @@ export default function Home() {
     }
 
     resetPaycheckFormFields();
+    showActionMessage(
+      editingPaycheckId ? "Paycheck updated." : "Paycheck added.",
+    );
   };
 
   const saveRecurringPaycheck = () => {
@@ -2925,6 +3169,11 @@ export default function Home() {
     }
 
     resetPaycheckFormFields();
+    showActionMessage(
+      editingRecurringPaycheckId
+        ? "Recurring paycheck updated."
+        : "Recurring paycheck added.",
+    );
   };
 
   const savePaycheck = () => {
@@ -2944,10 +3193,26 @@ export default function Home() {
     setPaycheckDate(paycheck.payDate);
   };
 
-  const removePaycheck = (id: string) => {
-    setPlannedPaychecks((prev) => prev.filter((paycheck) => paycheck.id !== id));
+  const removePaycheck = (id: string, options?: { skipConfirm?: boolean }) => {
+    const paycheck = plannedPaychecks.find((item) => item.id === id);
+    if (!paycheck) return;
+
+    if (
+      !options?.skipConfirm &&
+      !confirmAction(
+        `Delete "${paycheck.name}"? This removes it from your paychecks and timeline.`,
+      )
+    ) {
+      return;
+    }
+
+    setPlannedPaychecks((prev) => prev.filter((item) => item.id !== id));
     if (editingPaycheckId === id) {
       resetPaycheckFormFields();
+    }
+
+    if (!options?.skipConfirm) {
+      showActionMessage(`Deleted ${paycheck.name}.`);
     }
   };
 
@@ -2963,12 +3228,22 @@ export default function Home() {
   };
 
   const removeRecurringPaycheck = (id: string) => {
-    setRecurringPaychecks((prev) =>
-      prev.filter((paycheck) => paycheck.id !== id),
-    );
+    const paycheck = recurringPaychecks.find((item) => item.id === id);
+    if (!paycheck) return;
+
+    if (
+      !confirmAction(
+        `Delete recurring paycheck "${paycheck.name}"? This removes all future occurrences.`,
+      )
+    ) {
+      return;
+    }
+
+    setRecurringPaychecks((prev) => prev.filter((item) => item.id !== id));
     if (editingRecurringPaycheckId === id) {
       resetPaycheckFormFields();
     }
+    showActionMessage(`Deleted ${paycheck.name}.`);
   };
 
   const resetSpendingCategoryFormFields = () => {
@@ -3004,6 +3279,9 @@ export default function Home() {
     }
 
     resetSpendingCategoryFormFields();
+    showActionMessage(
+      editingSpendingCategoryId ? "Category updated." : "Category added.",
+    );
   };
 
   const startEditSpendingCategory = (category: SpendingCategory) => {
@@ -3013,9 +3291,18 @@ export default function Home() {
   };
 
   const removeSpendingCategory = (id: string) => {
-    setSpendingCategories((prev) =>
-      prev.filter((category) => category.id !== id),
-    );
+    const category = spendingCategories.find((item) => item.id === id);
+    if (!category) return;
+
+    if (
+      !confirmAction(
+        `Delete "${category.name}"? All transactions in this category will be removed.`,
+      )
+    ) {
+      return;
+    }
+
+    setSpendingCategories((prev) => prev.filter((item) => item.id !== id));
     setSpendingTransactionDrafts((prev) => {
       const next = { ...prev };
       delete next[id];
@@ -3034,6 +3321,7 @@ export default function Home() {
     if (editingSpendingCategoryId === id) {
       resetSpendingCategoryFormFields();
     }
+    showActionMessage(`Deleted ${category.name}.`);
   };
 
   const getSpendingTransactionDraft = (categoryId: string) =>
@@ -3078,24 +3366,38 @@ export default function Home() {
       ...prev,
       [categoryId]: { name: "", amount: "" },
     }));
+    showActionMessage("Transaction added.");
   };
 
   const removeSpendingTransaction = (
     categoryId: string,
     transactionId: string,
   ) => {
+    const category = spendingCategories.find((item) => item.id === categoryId);
+    const transaction = category?.transactions.find(
+      (item) => item.id === transactionId,
+    );
+    if (!transaction) return;
+
+    if (
+      !confirmAction(`Delete "${transaction.name}" from this category?`)
+    ) {
+      return;
+    }
+
     setSpendingCategories((prev) =>
-      prev.map((category) =>
-        category.id === categoryId
+      prev.map((item) =>
+        item.id === categoryId
           ? {
-              ...category,
-              transactions: category.transactions.filter(
-                (transaction) => transaction.id !== transactionId,
+              ...item,
+              transactions: item.transactions.filter(
+                (entry) => entry.id !== transactionId,
               ),
             }
-          : category,
+          : item,
       ),
     );
+    showActionMessage(`Deleted ${transaction.name}.`);
   };
 
   const isSpendingCategoryExpanded = (category: SpendingCategory): boolean => {
@@ -3181,6 +3483,7 @@ export default function Home() {
       },
     ]);
     setSpendingDecisionResult(null);
+    showActionMessage("Purchase added to your timeline.");
   };
 
   const cancelSpendingDecision = () => {
@@ -3207,12 +3510,16 @@ export default function Home() {
     const source = parseTimelineEventSource(event.id);
     if (!source) return;
 
+    if (!confirmAction(getTimelineDeleteConfirmMessage(event, source))) {
+      return;
+    }
+
     switch (source.kind) {
       case "bill":
-        removeBill(source.billId);
+        removeBill(source.billId, { skipConfirm: true });
         break;
       case "paycheck":
-        removePaycheck(source.paycheckId);
+        removePaycheck(source.paycheckId, { skipConfirm: true });
         break;
       case "recurring":
         setRecurringBills((prev) =>
@@ -3259,6 +3566,8 @@ export default function Home() {
     if (editingTimelineEventId === event.id) {
       cancelEditTimelineEvent();
     }
+
+    showActionMessage(`Removed ${event.name} from timeline.`);
   };
 
   const saveEditTimelineEvent = () => {
@@ -3414,6 +3723,7 @@ export default function Home() {
     }
 
     cancelEditTimelineEvent();
+    showActionMessage("Timeline event updated.");
   };
 
   const addTimelineEvent = () => {
@@ -3431,10 +3741,22 @@ export default function Home() {
     setEventAmount("");
     setEventDate("");
     setEventType("Expense");
+    showActionMessage("Timeline event added.");
   };
 
   const clearTimeline = () => {
+    if (timelineEvents.length === 0) return;
+
+    if (
+      !confirmAction(
+        "Clear all manual timeline events? Bills and paychecks will remain on your timeline.",
+      )
+    ) {
+      return;
+    }
+
     setTimelineEvents([]);
+    showActionMessage("Manual timeline events cleared.");
   };
 
   const profileName = profile.name.trim();
@@ -3462,6 +3784,7 @@ export default function Home() {
     financialCalculation?.rows,
     todayISO,
     financialCalculation?.shortfallCause ?? null,
+    hasCoreSetupData,
   );
   const dashboardCashFlowLabel = dashboardCashFlow.status;
 
@@ -3534,7 +3857,7 @@ export default function Home() {
               onClick={() => setProfileMenuOpen((open) => !open)}
               aria-expanded={profileMenuOpen}
               aria-haspopup="menu"
-              className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-300 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/[0.08]"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-300 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/[0.08]"
             >
               <span>{profileDisplayName}</span>
               <svg
@@ -3571,6 +3894,13 @@ export default function Home() {
                   label: "My Account",
                   action: () => {
                     setProfileModal("account");
+                    setProfileMenuOpen(false);
+                  },
+                },
+                {
+                  label: labels.language,
+                  action: () => {
+                    setProfileModal("language");
                     setProfileMenuOpen(false);
                   },
                 },
@@ -3631,15 +3961,15 @@ export default function Home() {
             </p>
 
             <p className="mt-4 max-w-md text-sm leading-relaxed text-slate-500 lg:mx-0">
-              Set up your bills, paychecks, and goals once — then make every
-              spending decision with confidence, not guesswork.
+              Set up your bills, paychecks, and goals once — then use the
+              Financial Confidence Assistant before every purchase.
             </p>
 
             {/* Stats */}
-            <dl className="mt-10 grid grid-cols-3 gap-4 border-t border-white/10 pt-8 sm:gap-6">
+            <dl className="mt-10 grid grid-cols-1 gap-4 border-t border-white/10 pt-8 sm:grid-cols-3 sm:gap-6">
               {[
                 { value: "1 Minute", label: "Setup" },
-                { value: "100%", label: "Private" },
+                { value: "Stored Locally", label: "Private by design" },
                 { value: "Real-Time", label: "Decisions" },
               ].map((stat) => (
                 <div key={stat.label}>
@@ -3657,9 +3987,18 @@ export default function Home() {
           {/* Calculator */}
           <section className="min-w-0">
             <div className="space-y-4 overflow-x-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-4 shadow-2xl shadow-black/40 backdrop-blur-xl sm:p-6 lg:p-8">
+              {actionMessage ? (
+                <div
+                  role="status"
+                  className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-medium text-emerald-200"
+                >
+                  {actionMessage}
+                </div>
+              ) : null}
+
               <CollapsibleSection
                 id="dashboard-summary"
-                title="Dashboard"
+                title={labels.dashboard}
                 subtitle="Your financial snapshot"
                 iconClassName="bg-blue-600/20 text-blue-400"
                 isOpen={sectionOpen.dashboardSummary}
@@ -3687,16 +4026,59 @@ export default function Home() {
                       : "Welcome back 👋"}
                   </p>
                   <p className="text-sm text-slate-400 sm:text-base">
-                    Here&apos;s your cash flow outlook.
+                    {hasCoreSetupData
+                      ? "Here's your cash flow outlook."
+                      : "Complete the setup steps below to unlock your outlook."}
                   </p>
                 </div>
+                {!hasCoreSetupData ? (
+                  <div className="mt-5 rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-4 sm:px-5">
+                    <p className="text-sm font-semibold text-blue-200">
+                      Quick setup
+                    </p>
+                    <ol className="mt-3 space-y-2 text-sm text-slate-300">
+                      <li className="flex items-start gap-2">
+                        <span className="font-semibold text-blue-300">1.</span>
+                        <button
+                          type="button"
+                          onClick={() => openAppSection("cashFlowTimeline")}
+                          className="text-left underline decoration-blue-400/40 underline-offset-2 transition hover:text-blue-200"
+                        >
+                          Enter your checking balance
+                        </button>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="font-semibold text-blue-300">2.</span>
+                        <button
+                          type="button"
+                          onClick={() => openAppSection("paychecks")}
+                          className="text-left underline decoration-blue-400/40 underline-offset-2 transition hover:text-blue-200"
+                        >
+                          Add your paychecks
+                        </button>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="font-semibold text-blue-300">3.</span>
+                        <button
+                          type="button"
+                          onClick={() => openAppSection("bills")}
+                          className="text-left underline decoration-blue-400/40 underline-offset-2 transition hover:text-blue-200"
+                        >
+                          Add your bills
+                        </button>
+                      </li>
+                    </ol>
+                  </div>
+                ) : null}
                 <dl className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
                     <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
-                      Current Balance
+                      {labels.currentBalance}
                     </dt>
                     <dd className="mt-2 text-xl font-bold tabular-nums text-white sm:text-2xl">
-                      ${checkingBalanceAmount}
+                      {checkingBalance !== ""
+                        ? `$${checkingBalanceAmount.toLocaleString()}`
+                        : "Not set"}
                     </dd>
                     <dd className="mt-1 text-xs text-slate-500 sm:text-sm">
                       In your checking account today
@@ -3704,7 +4086,7 @@ export default function Home() {
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
                     <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
-                      Next Paycheck
+                      {labels.nextPaycheck}
                     </dt>
                     <dd className="mt-2 text-xl font-bold text-white sm:text-2xl">
                       {nextPaycheckDateLabel}
@@ -3721,7 +4103,7 @@ export default function Home() {
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
                     <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
-                      Safe To Spend
+                      {labels.safeToSpend}
                     </dt>
                     <dd className="mt-2 text-xl font-bold tabular-nums text-white sm:text-2xl">
                       ${effectiveSafeToSpend}
@@ -3732,7 +4114,7 @@ export default function Home() {
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
                     <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
-                      Savings Goal
+                      {labels.savingsGoal}
                     </dt>
                     {primarySavingsGoal ? (
                       <>
@@ -3769,7 +4151,13 @@ export default function Home() {
                           No Goal Set
                         </dd>
                         <dd className="mt-1 text-xs text-slate-500 sm:text-sm">
-                          Create a savings goal
+                          <button
+                            type="button"
+                            onClick={() => openAppSection("goalsAndPlanning")}
+                            className="underline decoration-violet-400/40 underline-offset-2 transition hover:text-violet-300"
+                          >
+                            Create a savings goal
+                          </button>
                         </dd>
                       </>
                     )}
@@ -3778,10 +4166,8 @@ export default function Home() {
                 <div
                   role="status"
                   className={`mt-5 rounded-xl border px-4 py-4 sm:px-5 sm:py-5 ${
-                    cashShortfallDetected
-                      ? "border-red-500/30 bg-red-500/10"
-                      : "border-emerald-500/20 bg-emerald-500/10"
-                  }`}
+                    dashboardStatusStyles[dashboardCashFlowLabel].border
+                  } ${dashboardStatusStyles[dashboardCashFlowLabel].bg}`}
                 >
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-400 sm:text-sm">
                     Financial Confidence says:
@@ -3795,9 +4181,7 @@ export default function Home() {
                   </p>
                   <p
                     className={`mt-2 text-sm sm:text-base ${
-                      cashShortfallDetected
-                        ? "text-red-200"
-                        : "text-emerald-200"
+                      dashboardStatusStyles[dashboardCashFlowLabel].detail
                     }`}
                   >
                     {dashboardCashFlow.detail}
@@ -3807,7 +4191,7 @@ export default function Home() {
 
               <CollapsibleSection
                 id="bills"
-                title="Bills"
+                title={labels.bills}
                 subtitle="Manage one-time and recurring bills"
                 iconClassName="bg-amber-600/20 text-amber-400"
                 isOpen={sectionOpen.bills}
@@ -3830,6 +4214,10 @@ export default function Home() {
                 }
               >
                 <div className="space-y-6">
+                  <p className="text-sm leading-relaxed text-slate-400">
+                    Bills feed your Cash Flow Timeline and Safe To Spend. Add
+                    one-time or recurring bills to keep projections accurate.
+                  </p>
                   <form
                     className="space-y-4"
                     onSubmit={(e) => {
@@ -4027,7 +4415,7 @@ export default function Home() {
                     >
                       {editingBillId || editingRecurringBillId
                         ? "Save Bill"
-                        : "Add Bill"}
+                        : labels.addBill}
                     </button>
                   </form>
 
@@ -4063,7 +4451,7 @@ export default function Home() {
                                 <button
                                   type="button"
                                   onClick={() => removeBill(bill.id)}
-                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                  className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
                                   aria-label={`Remove ${bill.name}`}
                                 >
                                   Delete
@@ -4083,8 +4471,9 @@ export default function Home() {
                         </div>
                       </div>
                     ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-                        No one-time bills yet.
+                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
+                        No one-time bills yet. Add rent, utilities, or other
+                        upcoming due dates above.
                       </p>
                     )}
                   </div>
@@ -4121,7 +4510,7 @@ export default function Home() {
                                 <button
                                   type="button"
                                   onClick={() => removeRecurringBill(bill.id)}
-                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                  className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
                                   aria-label={`Remove ${bill.name}`}
                                 >
                                   Delete
@@ -4141,8 +4530,9 @@ export default function Home() {
                         </div>
                       </div>
                     ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-                        No recurring bills yet.
+                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
+                        No recurring bills yet. Add subscriptions, rent, or
+                        other monthly expenses above.
                       </p>
                     )}
                   </div>
@@ -4151,7 +4541,7 @@ export default function Home() {
 
               <CollapsibleSection
                 id="paychecks"
-                title="Paychecks"
+                title={labels.paychecks}
                 subtitle="Add manual or recurring paychecks — amounts can vary"
                 iconClassName="bg-emerald-600/20 text-emerald-400"
                 isOpen={sectionOpen.paychecks}
@@ -4175,6 +4565,10 @@ export default function Home() {
                 }
               >
                 <div className="space-y-6">
+                  <p className="text-sm leading-relaxed text-slate-400">
+                    Paychecks power your timeline and Safe To Spend. Recurring
+                    paychecks automatically generate future income events.
+                  </p>
                   <form
                     className="space-y-4"
                     onSubmit={(e) => {
@@ -4344,7 +4738,7 @@ export default function Home() {
                       {paycheckFormType === "manual"
                         ? editingPaycheckId
                           ? "Save Paycheck"
-                          : "Add Paycheck"
+                          : labels.addPaycheck
                         : editingRecurringPaycheckId
                           ? "Save Recurring Paycheck"
                           : "Add Recurring Paycheck"}
@@ -4386,7 +4780,7 @@ export default function Home() {
                                 <button
                                   type="button"
                                   onClick={() => removePaycheck(paycheck.id)}
-                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                  className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
                                   aria-label={`Remove ${paycheck.name}`}
                                 >
                                   Delete
@@ -4396,8 +4790,9 @@ export default function Home() {
                           ))}
                       </ul>
                     ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-                        No upcoming paychecks yet.
+                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
+                        No upcoming paychecks yet. Add manual paychecks above
+                        or set up a recurring schedule.
                       </p>
                     )}
                   </div>
@@ -4439,7 +4834,7 @@ export default function Home() {
                                 onClick={() =>
                                   removeRecurringPaycheck(paycheck.id)
                                 }
-                                className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
                                 aria-label={`Remove ${paycheck.name}`}
                               >
                                 Delete
@@ -4449,8 +4844,9 @@ export default function Home() {
                         ))}
                       </ul>
                     ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-                        No recurring paychecks yet.
+                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
+                        No recurring paychecks yet. Add a biweekly or monthly
+                        schedule above.
                       </p>
                     )}
                   </div>
@@ -4459,7 +4855,7 @@ export default function Home() {
 
               <CollapsibleSection
                 id="monthly-spending-plan"
-                title="Monthly Spending Plan"
+                title={labels.monthlySpendingPlan}
                 subtitle="Track spending by category"
                 iconClassName="bg-violet-600/20 text-violet-400"
                 isOpen={sectionOpen.monthlySpendingPlan}
@@ -4578,7 +4974,7 @@ export default function Home() {
                     <h3 className="text-sm font-semibold text-slate-300">
                       {editingSpendingCategoryId
                         ? "Edit Category"
-                        : "Add Category"}
+                        : labels.addCategory}
                     </h3>
                     <div>
                       <label
@@ -4629,7 +5025,7 @@ export default function Home() {
                     >
                       {editingSpendingCategoryId
                         ? "Save Category"
-                        : "Add Category"}
+                        : labels.addCategory}
                     </button>
                   </form>
 
@@ -4742,7 +5138,7 @@ export default function Home() {
                                     onClick={() =>
                                       removeSpendingCategory(category.id)
                                     }
-                                    className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-red-500/40 hover:text-red-300"
+                                    className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
                                     aria-label={`Remove ${category.name}`}
                                   >
                                     Delete
@@ -4905,7 +5301,7 @@ export default function Home() {
 
               <CollapsibleSection
                 id="cash-flow-timeline"
-                title="Cash Flow Timeline"
+                title={labels.cashFlowTimeline}
                 subtitle="Includes paychecks, recurring bills, and manual timeline events"
                 iconClassName="bg-teal-600/20 text-teal-400"
                 isOpen={sectionOpen.cashFlowTimeline}
@@ -4926,6 +5322,11 @@ export default function Home() {
                   </svg>
                 }
               >
+                <p className="mb-5 text-sm leading-relaxed text-slate-400">
+                  Your checking balance, bills, and paychecks build this
+                  projection. Add manual events below for one-off income or
+                  expenses.
+                </p>
                 <div>
                   <label
                     htmlFor="checking-balance"
@@ -5047,10 +5448,17 @@ export default function Home() {
                       disabled={timelineEvents.length === 0}
                       className="w-full min-w-0 rounded-xl border border-white/10 bg-white/5 py-3.5 text-sm font-semibold text-slate-200 transition hover:border-teal-500/40 hover:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-teal-500/20 active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      Clear Timeline
+                      Clear Manual Events
                     </button>
                   </div>
                 </form>
+
+                {!cashFlowProjection ? (
+                  <div className="mt-5 rounded-xl border border-teal-500/20 bg-teal-500/5 px-4 py-5 text-sm leading-relaxed text-slate-300">
+                    Enter your checking balance or add bills and paychecks to
+                    see your cash flow projection.
+                  </div>
+                ) : null}
 
                 {cashFlowProjection && (
                   <div className="mt-5 space-y-4">
@@ -5236,7 +5644,7 @@ export default function Home() {
                       </div>
                     )}
 
-                    {cashFlowProjection.rows.length > 0 && (
+                    {cashFlowProjection.rows.length > 0 ? (
                       <ul className="space-y-2">
                         {visibleTimelineRows.length > 0 ? (
                           visibleTimelineRows.map(({ event, runningBalance }) => (
@@ -5371,7 +5779,7 @@ export default function Home() {
                                     type="button"
                                     onClick={() => deleteTimelineEvent(event)}
                                     aria-label={`Delete ${event.name}`}
-                                    className="justify-self-start rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-200 sm:justify-self-end"
+                                    className={`${TOUCH_TARGET_BUTTON_CLASS} justify-self-start border-white/10 bg-white/5 font-semibold text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-200 sm:justify-self-end`}
                                   >
                                     Delete
                                   </button>
@@ -5385,6 +5793,11 @@ export default function Home() {
                           </li>
                         )}
                       </ul>
+                    ) : (
+                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-5 text-center text-sm text-slate-400">
+                        No upcoming events in your projection window. Add bills,
+                        paychecks, or manual events to populate your timeline.
+                      </p>
                     )}
 
                     <div
@@ -5405,7 +5818,7 @@ export default function Home() {
 
               <CollapsibleSection
                 id="goals-and-planning"
-                title="Goals & Planning"
+                title={labels.goalsAndPlanning}
                 subtitle="Track and manage your savings goals"
                 iconClassName="bg-violet-600/20 text-violet-400"
                 isOpen={sectionOpen.goalsAndPlanning}
@@ -5427,6 +5840,10 @@ export default function Home() {
                 }
               >
                 <div className="space-y-6">
+                  <p className="text-sm leading-relaxed text-slate-400">
+                    Your primary savings goal appears on the Dashboard and in
+                    Financial Confidence Assistant purchase guidance.
+                  </p>
                   <div>
                     <h4 className="mb-3 text-sm font-semibold text-violet-300">
                       Savings Goals
@@ -5518,7 +5935,7 @@ export default function Home() {
                           type="submit"
                           className="w-full rounded-xl border border-violet-500/40 bg-violet-600/20 py-3.5 text-sm font-semibold text-violet-300 transition hover:border-violet-500/60 hover:bg-violet-600/30 focus:outline-none focus:ring-2 focus:ring-violet-500/20 active:bg-violet-600/40"
                         >
-                          {editingGoalId ? "Save Goal" : "Add Goal"}
+                          {editingGoalId ? "Save Goal" : labels.addGoal}
                         </button>
                         {editingGoalId ? (
                           <button
@@ -5596,7 +6013,8 @@ export default function Home() {
                               <button
                                 type="button"
                                 onClick={() => deleteGoal(goal.id)}
-                                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-red-500/40 hover:text-red-300"
+                                className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 bg-white/5 font-semibold text-slate-300 transition hover:border-red-500/40 hover:text-red-300`}
+                                aria-label={`Delete ${formatGoalName(goal.name)}`}
                               >
                                 Delete
                               </button>
@@ -5606,8 +6024,9 @@ export default function Home() {
                       ))}
                     </ul>
                   ) : (
-                    <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
-                      No savings goals yet. Add your first goal above.
+                    <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-5 text-center text-sm leading-relaxed text-slate-400">
+                      No savings goals yet. Add your first goal above to track
+                      progress on the Dashboard and in purchase guidance.
                     </p>
                   )}
 
@@ -5615,9 +6034,9 @@ export default function Home() {
               </CollapsibleSection>
 
               <CollapsibleSection
-                id="spending-decision"
-                title="Financial Confidence Assistant"
-                subtitle="Know before you buy"
+                id="financial-confidence-assistant"
+                title={labels.financialConfidenceAssistant}
+                subtitle={labels.knowBeforeYouBuy}
                 iconClassName="bg-blue-600/20 text-blue-400"
                 isOpen={sectionOpen.spendingDecision}
                 onToggle={() => toggleSection("spendingDecision")}
@@ -5639,9 +6058,9 @@ export default function Home() {
                 }
               >
                 <p className="mb-5 text-sm leading-relaxed text-slate-400">
-                  Thinking about a purchase? Tell me what you&apos;re considering
-                  and I&apos;ll check it against your Safe To Spend — before you
-                  buy.
+                  Thinking about a purchase? Describe what you&apos;re considering
+                  and Financial Confidence will check it against your Safe To
+                  Spend — before you buy.
                 </p>
 
                 <form
@@ -5745,14 +6164,14 @@ export default function Home() {
                     type="submit"
                     className="w-full rounded-xl border border-blue-500/50 bg-blue-600/30 py-4 text-base font-bold text-blue-100 transition hover:border-blue-400/60 hover:bg-blue-600/40 focus:outline-none focus:ring-2 focus:ring-blue-500/30 active:bg-blue-600/50"
                   >
-                    Can I Afford This?
+                    Ask Financial Confidence
                   </button>
                 </form>
 
                 {!hasDashboardData ? (
                   <p className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-                    Add bills, paychecks, or a checking balance so I can
-                    calculate your Safe To Spend.
+                    Add a checking balance, bills, or paychecks so Financial
+                    Confidence can calculate your Safe To Spend.
                   </p>
                 ) : null}
 
@@ -5966,7 +6385,7 @@ export default function Home() {
 
                       <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Safe To Spend
+                          {labels.safeToSpend}
                         </p>
                         <dl className="mt-2 space-y-2 text-sm">
                           <div className="flex items-center justify-between gap-4">
@@ -6125,7 +6544,7 @@ export default function Home() {
               ),
               title: "Private by design",
               description:
-                "Your numbers stay on your device. Nothing is stored or shared.",
+                "Stored locally on your device. Never sent to a server or shared with anyone.",
             },
           ].map((feature) => (
             <div
@@ -6241,6 +6660,56 @@ export default function Home() {
                   </div>
                 </form>
               </>
+            ) : profileModal === "language" ? (
+              <>
+                <h2
+                  id="profile-modal-title"
+                  className="text-lg font-semibold text-white"
+                >
+                  {labels.selectLanguage}
+                </h2>
+                <div className="mt-5 space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => selectLanguage("en")}
+                    className={`flex w-full items-center justify-between rounded-xl border px-4 py-3.5 text-sm font-semibold transition ${
+                      language === "en"
+                        ? "border-cyan-500/40 bg-cyan-600/20 text-cyan-200"
+                        : "border-white/10 bg-white/5 text-slate-200 hover:border-white/20 hover:bg-white/[0.08]"
+                    }`}
+                  >
+                    <span>{APP_LABELS.en.english}</span>
+                    {language === "en" ? (
+                      <span className="text-xs font-medium text-cyan-300">
+                        ✓
+                      </span>
+                    ) : null}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectLanguage("es")}
+                    className={`flex w-full items-center justify-between rounded-xl border px-4 py-3.5 text-sm font-semibold transition ${
+                      language === "es"
+                        ? "border-cyan-500/40 bg-cyan-600/20 text-cyan-200"
+                        : "border-white/10 bg-white/5 text-slate-200 hover:border-white/20 hover:bg-white/[0.08]"
+                    }`}
+                  >
+                    <span>{APP_LABELS.es.spanish}</span>
+                    {language === "es" ? (
+                      <span className="text-xs font-medium text-cyan-300">
+                        ✓
+                      </span>
+                    ) : null}
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setProfileModal(null)}
+                  className="mt-5 w-full rounded-xl border border-white/10 bg-white/5 py-3 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.08]"
+                >
+                  Close
+                </button>
+              </>
             ) : (
               <>
                 <h2
@@ -6253,8 +6722,9 @@ export default function Home() {
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
                     <p className="font-medium text-slate-200">Local storage</p>
                     <p className="mt-1 leading-relaxed">
-                      Your financial data stays on this device. Nothing is sent
-                      to a server or shared with anyone.
+                      Your financial data stays on this device in your browser.
+                      Nothing is sent to a server or shared with anyone. Clearing
+                      browser data will remove your saved information.
                     </p>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
@@ -6290,7 +6760,7 @@ export default function Home() {
       <footer className="relative z-10 border-t border-white/10 py-8">
         <p className="text-center text-xs text-slate-600">
           © {new Date().getFullYear()} Financial Confidence. Built for smarter
-          spending decisions.
+          money decisions — stored locally on your device.
         </p>
       </footer>
     </div>
