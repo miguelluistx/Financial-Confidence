@@ -97,6 +97,8 @@ const DEFAULT_PROFILE: UserProfile = {
   email: "",
 };
 
+const APP_VERSION = "1.0.0";
+
 const TOUCH_TARGET_BUTTON_CLASS =
   "inline-flex min-h-[44px] items-center justify-center rounded-lg border px-3 py-2 text-xs";
 
@@ -1574,6 +1576,170 @@ function toISODate(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+function addDaysToISO(daysFromToday: number): string {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + daysFromToday);
+  return toISODate(date);
+}
+
+function createDemoPersistedData(): PersistedAppData {
+  return {
+    checkingBalance: "2450",
+    profile: { name: "Alex", email: "demo@example.com" },
+    plannedBills: [
+      {
+        id: "demo-bill-1",
+        name: "Car Insurance",
+        amount: 145,
+        dueDate: addDaysToISO(8),
+      },
+    ],
+    recurringBills: [
+      {
+        id: "demo-bill-rent",
+        name: "Rent",
+        amount: 1200,
+        dueDay: 1,
+        frequency: "Monthly",
+      },
+      {
+        id: "demo-bill-netflix",
+        name: "Netflix",
+        amount: 15.99,
+        dueDay: 12,
+        frequency: "Monthly",
+      },
+      {
+        id: "demo-bill-gym",
+        name: "Gym Membership",
+        amount: 45,
+        dueDay: 15,
+        frequency: "Monthly",
+      },
+    ],
+    recurringPaychecks: [
+      {
+        id: "demo-paycheck-rec",
+        name: "Biweekly Pay",
+        amount: 1850,
+        frequency: "Biweekly",
+        firstPayDate: addDaysToISO(5),
+        futurePaycheckCount: 6,
+      },
+    ],
+    plannedPaychecks: [],
+    spendingCategories: [
+      {
+        id: "demo-cat-food",
+        name: "Food",
+        monthlyBudget: 600,
+        transactions: [
+          { id: "demo-tx-1", name: "Walmart", amount: 125 },
+          { id: "demo-tx-2", name: "Costco", amount: 150 },
+          { id: "demo-tx-3", name: "Starbucks", amount: 15 },
+        ],
+      },
+      {
+        id: "demo-cat-gas",
+        name: "Gas",
+        monthlyBudget: 200,
+        transactions: [{ id: "demo-tx-4", name: "Shell", amount: 52 }],
+      },
+      {
+        id: "demo-cat-ent",
+        name: "Entertainment",
+        monthlyBudget: 150,
+        transactions: [{ id: "demo-tx-5", name: "AMC Theaters", amount: 38 }],
+      },
+      {
+        id: "demo-cat-shop",
+        name: "Shopping",
+        monthlyBudget: 300,
+        transactions: [{ id: "demo-tx-6", name: "Target", amount: 64 }],
+      },
+      {
+        id: "demo-cat-health",
+        name: "Health",
+        monthlyBudget: 100,
+        transactions: [],
+      },
+      {
+        id: "demo-cat-sub",
+        name: "Subscriptions",
+        monthlyBudget: 75,
+        transactions: [{ id: "demo-tx-7", name: "Spotify", amount: 11.99 }],
+      },
+      {
+        id: "demo-cat-misc",
+        name: "Miscellaneous",
+        monthlyBudget: 100,
+        transactions: [],
+      },
+    ],
+    savingsGoals: [
+      {
+        id: "demo-goal-1",
+        name: "Emergency Fund",
+        targetAmount: 5000,
+        currentSaved: 1200,
+        isPrimary: true,
+      },
+    ],
+    timelineEvents: [
+      {
+        id: "planned-purchase-demo-1",
+        name: "New Headphones",
+        amount: 89,
+        date: addDaysToISO(3),
+        type: "Expense",
+      },
+    ],
+    purchaseName: "",
+    purchaseAmount: "",
+    purchaseDate: "",
+    purchaseType: "One-Time",
+    spendingDecisionResult: null,
+    goalName: "Emergency Fund",
+    goalAmount: "5000",
+    currentSaved: "1200",
+    monthlyContribution: "200",
+    savingsGoalCalculated: false,
+    billName: "",
+    billAmount: "",
+    billDueDate: "",
+    billFormType: "one-time",
+    monthlyIncome: "",
+    monthlyExpenses: "",
+    monthlyBufferCalculated: false,
+    emergencyMonthlyExpenses: "",
+    emergencyCurrentSavings: "",
+    emergencyFundCalculated: false,
+    coachCurrentSavings: "1200",
+    coachSavingsGoal: "5000",
+    coachMonthlySavings: "200",
+    coachAdviceShown: false,
+    eventName: "",
+    eventAmount: "",
+    eventDate: "",
+    eventType: "Expense",
+    recurringBillName: "",
+    recurringBillAmount: "",
+    recurringDueDay: "1",
+    recurringFirstDueDate: "",
+    recurringFrequency: "Monthly",
+    paycheckName: "",
+    paycheckAmount: "",
+    paycheckDate: "",
+    paycheckFormType: "manual",
+    recurringPaycheckFrequency: "Biweekly",
+    recurringPaycheckFirstPayDate: "",
+    recurringPaycheckFutureCount: "6",
+    spendingCategoryName: "",
+    spendingCategoryBudget: "",
+  };
+}
+
 function getNextWeekdayISO(weekday: number): string {
   const date = new Date();
   date.setHours(0, 0, 0, 0);
@@ -1960,6 +2126,55 @@ function savePersistedData(data: PersistedAppData): void {
   }
 }
 
+type AppBackupFile = {
+  version: 1;
+  exportedAt: string;
+  language: AppLanguage;
+  data: PersistedAppData;
+};
+
+type LegacyPersistedInput = PersistedAppData & {
+  balance?: string;
+  purchaseQuestion?: string;
+  purchaseFrequency?: string;
+  affordabilityResult?: SpendingDecisionResult | null;
+  profile?: UserProfile & {
+    defaultCheckingBalance?: string;
+    typicalNetPaycheck?: string;
+    payFrequency?: string;
+    mainSavingsGoalAmount?: string;
+    email?: string;
+  };
+};
+
+function parseImportedBackup(
+  raw: unknown,
+): { data: PersistedAppData; language: AppLanguage } | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const record = raw as Record<string, unknown>;
+
+  if (record.version === 1 && record.data && typeof record.data === "object") {
+    return {
+      data: record.data as PersistedAppData,
+      language: record.language === "es" ? "es" : "en",
+    };
+  }
+
+  if (
+    "plannedBills" in record ||
+    "checkingBalance" in record ||
+    "savingsGoals" in record
+  ) {
+    return {
+      data: record as PersistedAppData,
+      language: loadLanguage(),
+    };
+  }
+
+  return null;
+}
+
 type EmergencyFundStatus = "Risky" | "Okay" | "Healthy";
 
 function getEmergencyFundStatus(monthsCovered: number): {
@@ -2105,7 +2320,7 @@ type SectionKey =
   | "goalsAndPlanning"
   | "spendingDecision";
 
-type ProfileModal = "account" | "settings" | "language" | null;
+type ProfileModal = "account" | "settings" | "language" | "loadSampleData" | null;
 
 type ProfileMenuPlacement = "bottom" | "top";
 
@@ -2278,6 +2493,7 @@ export default function Home() {
   const profileMenuRef = useRef<HTMLDivElement>(null);
   const profileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const profileMenuPanelRef = useRef<HTMLDivElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [profileMenuCoords, setProfileMenuCoords] = useState<ProfileMenuCoords>({
     top: 0,
     left: 0,
@@ -2409,6 +2625,105 @@ export default function Home() {
   };
   };
 
+  const applyPersistedData = (saved: PersistedAppData) => {
+    const legacySaved = saved as LegacyPersistedInput;
+
+    setPurchaseName(
+      legacySaved.purchaseName ?? legacySaved.purchaseQuestion ?? "",
+    );
+    setPurchaseAmount(legacySaved.purchaseAmount ?? "");
+    setPurchaseDate(legacySaved.purchaseDate ?? "");
+    setPurchaseType(
+      normalizePurchaseType(
+        legacySaved.purchaseType ?? legacySaved.purchaseFrequency,
+      ),
+    );
+    setSpendingDecisionResult(
+      normalizeSpendingDecisionResult(
+        legacySaved.spendingDecisionResult ??
+          legacySaved.affordabilityResult ??
+          null,
+      ),
+    );
+    setPlannedBills(legacySaved.plannedBills);
+    setBillName(legacySaved.billName);
+    setBillAmount(legacySaved.billAmount);
+    setBillDueDate(legacySaved.billDueDate);
+    setBillFormType(legacySaved.billFormType ?? "one-time");
+    setMonthlyIncome(legacySaved.monthlyIncome);
+    setMonthlyExpenses(
+      legacySaved.monthlyExpenses || legacySaved.emergencyMonthlyExpenses || "",
+    );
+    setMonthlyBufferCalculated(
+      legacySaved.monthlyBufferCalculated ||
+        legacySaved.emergencyFundCalculated ||
+        false,
+    );
+    setEmergencyCurrentSavings(legacySaved.emergencyCurrentSavings ?? "");
+    setCheckingBalance(
+      legacySaved.checkingBalance ?? legacySaved.balance ?? "",
+    );
+    setSavingsGoals(migrateSavingsGoals(legacySaved));
+    setMonthlyContribution(
+      legacySaved.monthlyContribution || legacySaved.coachMonthlySavings || "",
+    );
+    setSavingsGoalCalculated(
+      legacySaved.savingsGoalCalculated || legacySaved.coachAdviceShown || false,
+    );
+    setTimelineEvents(legacySaved.timelineEvents ?? []);
+    setEventName(legacySaved.eventName ?? "");
+    setEventAmount(legacySaved.eventAmount ?? "");
+    setEventDate(legacySaved.eventDate ?? "");
+    setEventType(legacySaved.eventType ?? "Expense");
+    setRecurringBills(legacySaved.recurringBills ?? []);
+    setRecurringBillName(legacySaved.recurringBillName ?? "");
+    setRecurringBillAmount(legacySaved.recurringBillAmount ?? "");
+    setRecurringDueDay(legacySaved.recurringDueDay ?? "1");
+    setRecurringFirstDueDate(legacySaved.recurringFirstDueDate ?? "");
+    setRecurringFrequency(legacySaved.recurringFrequency ?? "Monthly");
+    setPlannedPaychecks(legacySaved.plannedPaychecks ?? []);
+    setPaycheckName(legacySaved.paycheckName ?? "");
+    setPaycheckAmount(legacySaved.paycheckAmount ?? "");
+    setPaycheckDate(legacySaved.paycheckDate ?? "");
+    setPaycheckFormType(legacySaved.paycheckFormType ?? "manual");
+    setRecurringPaychecks(legacySaved.recurringPaychecks ?? []);
+    setRecurringPaycheckFrequency(
+      legacySaved.recurringPaycheckFrequency ?? "Biweekly",
+    );
+    setRecurringPaycheckFirstPayDate(
+      legacySaved.recurringPaycheckFirstPayDate ?? "",
+    );
+    setRecurringPaycheckFutureCount(
+      legacySaved.recurringPaycheckFutureCount ?? "6",
+    );
+    setSpendingCategories(
+      legacySaved.spendingCategories ?? createDefaultSpendingCategories(),
+    );
+    setSpendingCategoryName(legacySaved.spendingCategoryName ?? "");
+    setSpendingCategoryBudget(legacySaved.spendingCategoryBudget ?? "");
+
+    const loadedProfile = legacySaved.profile;
+    setProfile({
+      name: loadedProfile?.name ?? "",
+      email: loadedProfile?.email ?? "",
+    });
+
+    setEditingGoalId(null);
+    setGoalFormName("");
+    setGoalFormTarget("");
+    setGoalFormSaved("");
+    setGoalFormIsPrimary(false);
+    setEditingBillId(null);
+    setEditingRecurringBillId(null);
+    setEditingPaycheckId(null);
+    setEditingRecurringPaycheckId(null);
+    setEditingTimelineEventId(null);
+    setEditingSpendingCategoryId(null);
+    setSpendingTransactionDrafts({});
+    setSpendingCategoryExpanded({});
+    setSpendingTransactionFormOpen({});
+  };
+
   useEffect(() => {
     if (!profileMenuOpen) return;
 
@@ -2530,99 +2845,7 @@ export default function Home() {
 
     const saved = loadPersistedData();
     if (saved) {
-      const legacySaved = saved as PersistedAppData & {
-        balance?: string;
-        purchaseQuestion?: string;
-        purchaseFrequency?: string;
-        affordabilityResult?: SpendingDecisionResult | null;
-        profile?: UserProfile & {
-          defaultCheckingBalance?: string;
-          typicalNetPaycheck?: string;
-          payFrequency?: string;
-          mainSavingsGoalAmount?: string;
-          email?: string;
-        };
-      };
-
-      setPurchaseName(
-        legacySaved.purchaseName ?? legacySaved.purchaseQuestion ?? "",
-      );
-      setPurchaseAmount(legacySaved.purchaseAmount ?? "");
-      setPurchaseDate(legacySaved.purchaseDate ?? "");
-      setPurchaseType(
-        normalizePurchaseType(
-          legacySaved.purchaseType ?? legacySaved.purchaseFrequency,
-        ),
-      );
-      setSpendingDecisionResult(
-        normalizeSpendingDecisionResult(
-          legacySaved.spendingDecisionResult ??
-            legacySaved.affordabilityResult ??
-            null,
-        ),
-      );
-      setPlannedBills(legacySaved.plannedBills);
-      setBillName(legacySaved.billName);
-      setBillAmount(legacySaved.billAmount);
-      setBillDueDate(legacySaved.billDueDate);
-      setBillFormType(legacySaved.billFormType ?? "one-time");
-      setMonthlyIncome(legacySaved.monthlyIncome);
-      setMonthlyExpenses(
-        legacySaved.monthlyExpenses || legacySaved.emergencyMonthlyExpenses || "",
-      );
-      setMonthlyBufferCalculated(
-        legacySaved.monthlyBufferCalculated ||
-          legacySaved.emergencyFundCalculated ||
-          false,
-      );
-      setEmergencyCurrentSavings(legacySaved.emergencyCurrentSavings ?? "");
-      setCheckingBalance(
-        legacySaved.checkingBalance ?? legacySaved.balance ?? "",
-      );
-      setSavingsGoals(migrateSavingsGoals(legacySaved));
-      setMonthlyContribution(
-        legacySaved.monthlyContribution || legacySaved.coachMonthlySavings || "",
-      );
-      setSavingsGoalCalculated(
-        legacySaved.savingsGoalCalculated || legacySaved.coachAdviceShown || false,
-      );
-      setTimelineEvents(legacySaved.timelineEvents ?? []);
-      setEventName(legacySaved.eventName ?? "");
-      setEventAmount(legacySaved.eventAmount ?? "");
-      setEventDate(legacySaved.eventDate ?? "");
-      setEventType(legacySaved.eventType ?? "Expense");
-      setRecurringBills(legacySaved.recurringBills ?? []);
-      setRecurringBillName(legacySaved.recurringBillName ?? "");
-      setRecurringBillAmount(legacySaved.recurringBillAmount ?? "");
-      setRecurringDueDay(legacySaved.recurringDueDay ?? "1");
-      setRecurringFirstDueDate(legacySaved.recurringFirstDueDate ?? "");
-      setRecurringFrequency(legacySaved.recurringFrequency ?? "Monthly");
-      setPlannedPaychecks(legacySaved.plannedPaychecks ?? []);
-      setPaycheckName(legacySaved.paycheckName ?? "");
-      setPaycheckAmount(legacySaved.paycheckAmount ?? "");
-      setPaycheckDate(legacySaved.paycheckDate ?? "");
-      setPaycheckFormType(legacySaved.paycheckFormType ?? "manual");
-      setRecurringPaychecks(legacySaved.recurringPaychecks ?? []);
-      setRecurringPaycheckFrequency(
-        legacySaved.recurringPaycheckFrequency ?? "Biweekly",
-      );
-      setRecurringPaycheckFirstPayDate(
-        legacySaved.recurringPaycheckFirstPayDate ?? "",
-      );
-      setRecurringPaycheckFutureCount(
-        legacySaved.recurringPaycheckFutureCount ?? "6",
-      );
-      setSpendingCategories(
-        legacySaved.spendingCategories ?? createDefaultSpendingCategories(),
-      );
-      setSpendingCategoryName(legacySaved.spendingCategoryName ?? "");
-      setSpendingCategoryBudget(legacySaved.spendingCategoryBudget ?? "");
-
-      const loadedProfile = legacySaved.profile;
-      setProfile({
-        name: loadedProfile?.name ?? "",
-        email: loadedProfile?.email ?? "",
-      });
+      applyPersistedData(saved);
     } else {
       setSpendingCategories(createDefaultSpendingCategories());
     }
@@ -2819,7 +3042,13 @@ export default function Home() {
   };
 
   const exportData = () => {
-    const blob = new Blob([JSON.stringify(getPersistedSnapshot(), null, 2)], {
+    const backup: AppBackupFile = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      language,
+      data: getPersistedSnapshot(),
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
@@ -2829,12 +3058,64 @@ export default function Home() {
     link.click();
     URL.revokeObjectURL(url);
     setProfileMenuOpen(false);
-    showActionMessage("Backup downloaded to your device.");
+    showActionMessage("Backup Downloaded");
+  };
+
+  const importData = () => {
+    importInputRef.current?.click();
+    setProfileMenuOpen(false);
+  };
+
+  const handleImportFileChange = (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        const imported = parseImportedBackup(parsed);
+
+        if (!imported) {
+          window.alert("Invalid backup file. Please choose a valid export.");
+          return;
+        }
+
+        applyPersistedData(imported.data);
+        setLanguage(imported.language);
+        saveLanguage(imported.language);
+        savePersistedData(imported.data);
+        setProfileModal(null);
+        showActionMessage("Backup Restored Successfully");
+      } catch {
+        window.alert("Invalid backup file. Please choose a valid export.");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const openLoadSampleDataModal = () => {
+    setProfileMenuOpen(false);
+    setProfileModal("loadSampleData");
+  };
+
+  const confirmLoadSampleData = () => {
+    const demoData = createDemoPersistedData();
+    applyPersistedData(demoData);
+    setLanguage("en");
+    saveLanguage("en");
+    savePersistedData(demoData);
+    setProfileModal(null);
+    showActionMessage("✓ Sample Data Loaded Successfully");
   };
 
   const resetAllData = () => {
     if (
-      !window.confirm(
+      !confirmAction(
         "Reset all data? This clears your bills, paychecks, goals, and profile.",
       )
     ) {
@@ -2842,6 +3123,7 @@ export default function Home() {
     }
 
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LANGUAGE_STORAGE_KEY);
     setPurchaseName("");
     setPurchaseAmount("");
     setPurchaseDate("");
@@ -2894,7 +3176,8 @@ export default function Home() {
     setProfileMessage("");
     setProfileMenuOpen(false);
     setProfileModal(null);
-    showActionMessage("All data reset.");
+    setLanguage("en");
+    showActionMessage("✓ Data Reset Successfully");
   };
 
   const resetBillFormFields = () => {
@@ -3827,6 +4110,15 @@ export default function Home() {
 
   return (
     <div className="relative min-h-screen bg-slate-950 font-sans text-white">
+      <input
+        ref={importInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={handleImportFileChange}
+      />
       {/* Background */}
       <div
         className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_60%_at_50%_-20%,rgba(59,130,246,0.35),transparent)]"
@@ -3887,54 +4179,100 @@ export default function Home() {
                 top: profileMenuCoords.top,
                 left: profileMenuCoords.left,
               }}
-              className="fixed z-[200] w-48 rounded-xl border border-white/10 bg-slate-900 py-1 shadow-2xl shadow-black/40 backdrop-blur-xl"
+              className="fixed z-[200] w-52 rounded-xl border border-white/10 bg-slate-900 py-1 shadow-2xl shadow-black/40 backdrop-blur-xl"
             >
-              {[
-                {
-                  label: "My Account",
-                  action: () => {
-                    setProfileModal("account");
-                    setProfileMenuOpen(false);
-                  },
-                },
-                {
-                  label: labels.language,
-                  action: () => {
-                    setProfileModal("language");
-                    setProfileMenuOpen(false);
-                  },
-                },
-                {
-                  label: "Export Data",
-                  action: exportData,
-                },
-                {
-                  label: "Reset Data",
-                  action: resetAllData,
-                  danger: true,
-                },
-                {
-                  label: "Settings",
-                  action: () => {
-                    setProfileModal("settings");
-                    setProfileMenuOpen(false);
-                  },
-                },
-              ].map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  role="menuitem"
-                  onClick={item.action}
-                  className={`block w-full px-4 py-2.5 text-left text-sm transition hover:bg-white/[0.06] ${
-                    item.danger
-                      ? "text-red-300 hover:text-red-200"
-                      : "text-slate-200"
-                  }`}
-                >
-                  {item.label}
-                </button>
-              ))}
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setProfileModal("account");
+                  setProfileMenuOpen(false);
+                }}
+                className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+              >
+                My Account
+              </button>
+
+              <div
+                className="my-1 border-t border-white/10"
+                role="separator"
+                aria-hidden="true"
+              />
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setProfileModal("language");
+                  setProfileMenuOpen(false);
+                }}
+                className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+              >
+                {labels.language}
+              </button>
+
+              <div className="my-1" role="presentation" aria-hidden="true" />
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={exportData}
+                className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+              >
+                Export Data
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={importData}
+                className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+              >
+                Import Data
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={openLoadSampleDataModal}
+                className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+              >
+                Load Sample Data
+              </button>
+
+              <div
+                className="my-1 border-t border-white/10"
+                role="separator"
+                aria-hidden="true"
+              />
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={resetAllData}
+                className="block w-full px-4 py-2.5 text-left text-sm text-red-300 transition hover:bg-red-500/10 hover:text-red-200"
+              >
+                Reset All Data
+              </button>
+
+              <div
+                className="my-1 border-t border-white/10"
+                role="separator"
+                aria-hidden="true"
+              />
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setProfileModal("settings");
+                  setProfileMenuOpen(false);
+                }}
+                className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+              >
+                Settings
+              </button>
+              <p className="px-4 pb-2 pt-1 text-xs text-slate-500">
+                Version {APP_VERSION}
+              </p>
             </div>,
             document.body,
           )
@@ -6659,6 +6997,35 @@ export default function Home() {
                     </button>
                   </div>
                 </form>
+              </>
+            ) : profileModal === "loadSampleData" ? (
+              <>
+                <h2
+                  id="profile-modal-title"
+                  className="text-lg font-semibold text-white"
+                >
+                  Load Sample Data?
+                </h2>
+                <p className="mt-3 text-sm leading-relaxed text-slate-400">
+                  This will replace your current app data with sample data for
+                  testing.
+                </p>
+                <div className="mt-6 flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setProfileModal(null)}
+                    className="flex-1 rounded-xl border border-white/10 bg-white/5 py-3 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.08]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmLoadSampleData}
+                    className="flex-1 rounded-xl border border-cyan-500/40 bg-cyan-600/20 py-3 text-sm font-semibold text-cyan-300 transition hover:border-cyan-500/60 hover:bg-cyan-600/30"
+                  >
+                    Load Sample Data
+                  </button>
+                </div>
               </>
             ) : profileModal === "language" ? (
               <>
