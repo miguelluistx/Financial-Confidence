@@ -1,7 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
+import {
+  formatAccountCreatedDate,
+  getLanguageLabel,
+  getUserDisplayName,
+  getUserLanguagePreference,
+} from "@/lib/auth/user";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 
 type PlannedBill = {
   id: string;
@@ -1781,7 +1790,7 @@ function getRecurringOccurrencesInRange(
   endDay.setHours(23, 59, 59, 999);
 
   if (bill.frequency === "Monthly") {
-    let monthCursor = new Date(startDay.getFullYear(), startDay.getMonth(), 1);
+    const monthCursor = new Date(startDay.getFullYear(), startDay.getMonth(), 1);
     while (monthCursor <= endDay) {
       const daysInMonth = new Date(
         monthCursor.getFullYear(),
@@ -2320,7 +2329,13 @@ type SectionKey =
   | "goalsAndPlanning"
   | "spendingDecision";
 
-type ProfileModal = "account" | "settings" | "language" | "loadSampleData" | null;
+type ProfileModal =
+  | "account"
+  | "profile"
+  | "settings"
+  | "language"
+  | "loadSampleData"
+  | null;
 
 type ProfileMenuPlacement = "bottom" | "top";
 
@@ -2485,8 +2500,10 @@ export default function Home() {
     spendingDecision: false,
   });
   const [isHydrated, setIsHydrated] = useState(false);
-  const [language, setLanguage] = useState<AppLanguage>("en");
+  const [language, setLanguage] = useState<AppLanguage>(() => loadLanguage());
   const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const supabaseRef = useRef<SupabaseClient | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [profileModal, setProfileModal] = useState<ProfileModal>(null);
   const [profileMessage, setProfileMessage] = useState("");
@@ -2557,14 +2574,82 @@ export default function Home() {
     setSectionOpen((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const profileDisplayName = profile.name.trim() || "Account";
+  const profileDisplayName =
+    (authUser ? getUserDisplayName(authUser) : "") ||
+    profile.name.trim() ||
+    "Account";
   const labels = APP_LABELS[language];
 
-  const selectLanguage = (nextLanguage: AppLanguage) => {
+  const applyAuthUserToProfile = (user: User) => {
+    const displayName = getUserDisplayName(user);
+    const email = user.email ?? "";
+    setProfile((prev) => ({
+      name: displayName || prev.name,
+      email: email || prev.email,
+    }));
+
+    const preferredLanguage = getUserLanguagePreference(user);
+    if (preferredLanguage) {
+      setLanguage(preferredLanguage);
+      saveLanguage(preferredLanguage);
+    }
+  };
+
+  useEffect(() => {
+    if (!isSupabaseConfigured()) {
+      return;
+    }
+
+    let mounted = true;
+    const supabase = createClient();
+    if (!supabase) {
+      return;
+    }
+
+    supabaseRef.current = supabase;
+
+    const loadSession = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!mounted) return;
+
+      setAuthUser(user);
+      if (user) {
+        applyAuthUserToProfile(user);
+      }
+    };
+
+    void loadSession();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user ?? null;
+      setAuthUser(user);
+      if (user) {
+        applyAuthUserToProfile(user);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const selectLanguage = async (nextLanguage: AppLanguage) => {
     setLanguage(nextLanguage);
     saveLanguage(nextLanguage);
     setProfileModal(null);
     setProfileMenuOpen(false);
+
+    if (authUser && supabaseRef.current) {
+      await supabaseRef.current.auth.updateUser({
+        data: { language_preference: nextLanguage },
+      });
+    }
   };
 
   const getPersistedSnapshot = (): PersistedAppData => {
@@ -2841,15 +2926,16 @@ export default function Home() {
   const cashFlowProjection = financialCalculation;
 
   useEffect(() => {
-    setLanguage(loadLanguage());
-
     const saved = loadPersistedData();
-    if (saved) {
-      applyPersistedData(saved);
-    } else {
-      setSpendingCategories(createDefaultSpendingCategories());
-    }
-    setIsHydrated(true);
+
+    queueMicrotask(() => {
+      if (saved) {
+        applyPersistedData(saved);
+      } else {
+        setSpendingCategories(createDefaultSpendingCategories());
+      }
+      setIsHydrated(true);
+    });
   }, []);
 
   useEffect(() => {
@@ -3035,10 +3121,27 @@ export default function Home() {
     );
   };
 
-  const saveProfile = () => {
+  const saveProfile = async () => {
     savePersistedData(getPersistedSnapshot());
+
+    if (authUser && supabaseRef.current) {
+      await supabaseRef.current.auth.updateUser({
+        data: { full_name: profile.name.trim() },
+      });
+    }
+
     setProfileMessage("Account saved.");
     setProfileModal(null);
+  };
+
+  const handleLogout = async () => {
+    if (supabaseRef.current) {
+      await supabaseRef.current.auth.signOut();
+    }
+    setAuthUser(null);
+    setProfileMenuOpen(false);
+    setProfileModal(null);
+    showActionMessage("Signed out successfully.");
   };
 
   const exportData = () => {
@@ -4192,6 +4295,17 @@ export default function Home() {
               >
                 My Account
               </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setProfileModal("profile");
+                  setProfileMenuOpen(false);
+                }}
+                className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+              >
+                Profile
+              </button>
 
               <div
                 className="my-1 border-t border-white/10"
@@ -4210,6 +4324,18 @@ export default function Home() {
               >
                 {labels.language}
               </button>
+              {authUser ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    void handleLogout();
+                  }}
+                  className="block w-full px-4 py-2.5 text-left text-sm text-slate-200 transition hover:bg-white/[0.06]"
+                >
+                  Logout
+                </button>
+              ) : null}
 
               <div className="my-1" role="presentation" aria-hidden="true" />
 
@@ -6997,6 +7123,99 @@ export default function Home() {
                     </button>
                   </div>
                 </form>
+              </>
+            ) : profileModal === "profile" ? (
+              <>
+                <h2
+                  id="profile-modal-title"
+                  className="text-lg font-semibold text-white"
+                >
+                  Profile
+                </h2>
+                {authUser ? (
+                  <>
+                    <p className="mt-1 text-sm text-slate-500">
+                      Your account identity is managed securely with Supabase.
+                    </p>
+                    <dl className="mt-5 space-y-4">
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                        <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                          Name
+                        </dt>
+                        <dd className="mt-1 text-sm font-medium text-white">
+                          {getUserDisplayName(authUser) || "—"}
+                        </dd>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                        <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                          Email
+                        </dt>
+                        <dd className="mt-1 text-sm font-medium text-white">
+                          {authUser.email ?? "—"}
+                        </dd>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                        <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                          Language Preference
+                        </dt>
+                        <dd className="mt-1 text-sm font-medium text-white">
+                          {getLanguageLabel(language)}
+                        </dd>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-4">
+                        <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                          Account Created
+                        </dt>
+                        <dd className="mt-1 text-sm font-medium text-white">
+                          {formatAccountCreatedDate(authUser.created_at)}
+                        </dd>
+                      </div>
+                    </dl>
+                  </>
+                ) : !isSupabaseConfigured() ? (
+                  <>
+                    <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-relaxed text-amber-200">
+                      Authentication is not configured. Add{" "}
+                      <code className="text-amber-100">NEXT_PUBLIC_SUPABASE_URL</code>{" "}
+                      and{" "}
+                      <code className="text-amber-100">
+                        NEXT_PUBLIC_SUPABASE_ANON_KEY
+                      </code>{" "}
+                      to your <code className="text-amber-100">.env.local</code> file
+                      to enable Sign Up and Log In.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="mt-3 text-sm leading-relaxed text-slate-400">
+                      Sign in to view your account profile, or create a new
+                      account to get started.
+                    </p>
+                    <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+                      <Link
+                        href="/login"
+                        onClick={() => setProfileModal(null)}
+                        className="flex-1 rounded-xl border border-cyan-500/40 bg-cyan-600/20 py-3 text-center text-sm font-semibold text-cyan-300 transition hover:border-cyan-500/60 hover:bg-cyan-600/30"
+                      >
+                        Log In
+                      </Link>
+                      <Link
+                        href="/signup"
+                        onClick={() => setProfileModal(null)}
+                        className="flex-1 rounded-xl border border-white/10 bg-white/5 py-3 text-center text-sm font-semibold text-slate-300 transition hover:bg-white/[0.08]"
+                      >
+                        Sign Up
+                      </Link>
+                    </div>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setProfileModal(null)}
+                  className="mt-5 w-full rounded-xl border border-white/10 bg-white/5 py-3 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.08]"
+                >
+                  Close
+                </button>
               </>
             ) : profileModal === "loadSampleData" ? (
               <>
