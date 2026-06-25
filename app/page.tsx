@@ -135,6 +135,43 @@ function getTimelineDeleteConfirmMessage(
   }
 }
 
+function getTimelineCompleteConfirmMessage(event: TimelineEvent): string {
+  if (event.type === "Income") {
+    return `Mark "${event.name}" as received? This adds $${event.amount.toLocaleString()} to your current balance.`;
+  }
+
+  return `Mark "${event.name}" as paid? This subtracts $${event.amount.toLocaleString()} from your current balance.`;
+}
+
+function getTimelineCompleteSuccessMessage(event: TimelineEvent): string {
+  return event.type === "Income"
+    ? `Marked ${event.name} as received.`
+    : `Marked ${event.name} as paid.`;
+}
+
+function getCompletedTimelineEventIdSet(
+  completedEvents: CompletedTimelineEvent[],
+): Set<string> {
+  return new Set(completedEvents.map((event) => event.sourceEventId));
+}
+
+function getNextUpcomingPaycheckFromEvents(
+  events: TimelineEvent[],
+): UpcomingPaycheck | null {
+  const today = toISODate(new Date());
+  const nextIncome = sortTimelineEvents(events).find(
+    (event) => event.type === "Income" && event.date >= today,
+  );
+
+  if (!nextIncome) return null;
+
+  return {
+    payDate: nextIncome.date,
+    name: nextIncome.name,
+    amount: nextIncome.amount,
+  };
+}
+
 function getGoalProgressPercent(goal: SavingsGoal): number {
   if (goal.targetAmount <= 0) return 0;
 
@@ -1248,6 +1285,17 @@ type TimelineEvent = {
   type: TimelineEventType;
 };
 
+type CompletedTimelineEvent = {
+  id: string;
+  sourceEventId: string;
+  name: string;
+  amount: number;
+  type: TimelineEventType;
+  paid: true;
+  completedDate: string;
+  originalDueDate: string;
+};
+
 type CashFlowStatus = "risk" | "low" | "healthy";
 
 type ShortfallCause = "purchase" | "bill_before_paycheck" | null;
@@ -1292,10 +1340,14 @@ function runFinancialCalculation(
       }
       runningBalance -= event.amount;
     } else {
+      runningBalance += event.amount;
       if (event.date >= todayISO && trackingBeforeNextPaycheck) {
+        lowestBeforeNextPaycheck = Math.min(
+          lowestBeforeNextPaycheck,
+          runningBalance,
+        );
         trackingBeforeNextPaycheck = false;
       }
-      runningBalance += event.amount;
     }
 
     if (trackingBeforeNextPaycheck && event.date >= todayISO) {
@@ -1492,6 +1544,7 @@ function buildFinancialTimelineEvents(
   recurringPaychecks: RecurringPaycheck[],
   timelineEvents: TimelineEvent[],
   horizonEnd: Date,
+  completedEventIds: Set<string> = new Set(),
 ): TimelineEvent[] {
   const todayISO = toISODate(new Date());
   const today = new Date();
@@ -1558,7 +1611,7 @@ function buildFinancialTimelineEvents(
     ...manualPaycheckEvents,
     ...recurringPaycheckEvents,
     ...manualEvents,
-  ];
+  ].filter((event) => !completedEventIds.has(event.id));
 }
 
 function runFinancialTimeline(
@@ -1704,6 +1757,7 @@ function createDemoPersistedData(): PersistedAppData {
         type: "Expense",
       },
     ],
+    completedTimelineEvents: [],
     purchaseName: "",
     purchaseAmount: "",
     purchaseDate: "",
@@ -1880,7 +1934,7 @@ function getShortfallExpenseEvents(
   for (const { event, runningBalance } of rows) {
     if (event.date < todayISO) continue;
 
-    if (event.type === "Income") {
+    if (event.type === "Income" && event.date > todayISO) {
       break;
     }
 
@@ -2014,6 +2068,7 @@ type PersistedAppData = {
   coachMonthlySavings: string;
   coachAdviceShown: boolean;
   timelineEvents: TimelineEvent[];
+  completedTimelineEvents?: CompletedTimelineEvent[];
   eventName: string;
   eventAmount: string;
   eventDate: string;
@@ -2440,6 +2495,9 @@ export default function Home() {
   const [monthlyBufferCalculated, setMonthlyBufferCalculated] = useState(false);
   const [emergencyCurrentSavings, setEmergencyCurrentSavings] = useState("");
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [completedTimelineEvents, setCompletedTimelineEvents] = useState<
+    CompletedTimelineEvent[]
+  >([]);
   const [eventName, setEventName] = useState("");
   const [eventAmount, setEventAmount] = useState("");
   const [eventDate, setEventDate] = useState("");
@@ -2683,6 +2741,7 @@ export default function Home() {
     coachMonthlySavings: monthlyContribution,
     coachAdviceShown: savingsGoalCalculated,
     timelineEvents,
+    completedTimelineEvents,
     eventName,
     eventAmount,
     eventDate,
@@ -2756,6 +2815,7 @@ export default function Home() {
       legacySaved.savingsGoalCalculated || legacySaved.coachAdviceShown || false,
     );
     setTimelineEvents(legacySaved.timelineEvents ?? []);
+    setCompletedTimelineEvents(legacySaved.completedTimelineEvents ?? []);
     setEventName(legacySaved.eventName ?? "");
     setEventAmount(legacySaved.eventAmount ?? "");
     setEventDate(legacySaved.eventDate ?? "");
@@ -2907,6 +2967,8 @@ export default function Home() {
     plannedPaychecks,
     recurringPaychecks,
   );
+  const completedTimelineEventIds =
+    getCompletedTimelineEventIdSet(completedTimelineEvents);
   const unifiedTimelineEvents = buildFinancialTimelineEvents(
     plannedBills,
     recurringBills,
@@ -2914,6 +2976,7 @@ export default function Home() {
     recurringPaychecks,
     timelineEvents,
     timelineHorizonEnd,
+    completedTimelineEventIds,
   );
 
   const financialCalculation =
@@ -2963,6 +3026,7 @@ export default function Home() {
     monthlyBufferCalculated,
     emergencyCurrentSavings,
     timelineEvents,
+    completedTimelineEvents,
     eventName,
     eventAmount,
     eventDate,
@@ -3246,6 +3310,7 @@ export default function Home() {
     setMonthlyBufferCalculated(false);
     setEmergencyCurrentSavings("");
     setTimelineEvents([]);
+    setCompletedTimelineEvents([]);
     setEventName("");
     setEventAmount("");
     setEventDate("");
@@ -3956,6 +4021,85 @@ export default function Home() {
     showActionMessage(`Removed ${event.name} from timeline.`);
   };
 
+  const completeTimelineEvent = (event: TimelineEvent) => {
+    const source = parseTimelineEventSource(event.id);
+    if (!source) return;
+
+    if (!confirmAction(getTimelineCompleteConfirmMessage(event))) {
+      return;
+    }
+
+    const completedDate = toISODate(new Date());
+    const completedEntry: CompletedTimelineEvent = {
+      id: crypto.randomUUID(),
+      sourceEventId: event.id,
+      name: event.name,
+      amount: event.amount,
+      type: event.type,
+      paid: true,
+      completedDate,
+      originalDueDate: event.date,
+    };
+
+    setCompletedTimelineEvents((prev) => [completedEntry, ...prev]);
+
+    const balanceDelta =
+      event.type === "Income" ? event.amount : -event.amount;
+    setCheckingBalance((prev) => {
+      const current = Number(prev) || 0;
+      const nextBalance = Math.round((current + balanceDelta) * 100) / 100;
+      return String(nextBalance);
+    });
+
+    switch (source.kind) {
+      case "recurring":
+        setRecurringBills((prev) =>
+          prev.map((bill) =>
+            bill.id === source.billId
+              ? {
+                  ...bill,
+                  skippedDates: Array.from(
+                    new Set([
+                      ...(bill.skippedDates ?? []),
+                      source.occurrenceDate,
+                    ]),
+                  ),
+                }
+              : bill,
+          ),
+        );
+        break;
+      case "recurring-paycheck":
+        setRecurringPaychecks((prev) =>
+          prev.map((paycheck) =>
+            paycheck.id === source.paycheckId
+              ? {
+                  ...paycheck,
+                  skippedDates: Array.from(
+                    new Set([
+                      ...(paycheck.skippedDates ?? []),
+                      source.occurrenceDate,
+                    ]),
+                  ),
+                }
+              : paycheck,
+          ),
+        );
+        break;
+      case "bill":
+      case "paycheck":
+      case "planned-purchase":
+      case "manual":
+        break;
+    }
+
+    if (editingTimelineEventId === event.id) {
+      cancelEditTimelineEvent();
+    }
+
+    showActionMessage(getTimelineCompleteSuccessMessage(event));
+  };
+
   const saveEditTimelineEvent = () => {
     if (!editingTimelineEventId) return;
 
@@ -4155,9 +4299,8 @@ export default function Home() {
         spendingDecisionResult.safeToSpendAfterPurchase,
       )
     : null;
-  const nextUpcomingPaycheck = getNextUpcomingPaycheck(
-    plannedPaychecks,
-    recurringPaychecks,
+  const nextUpcomingPaycheck = getNextUpcomingPaycheckFromEvents(
+    unifiedTimelineEvents,
   );
   const nextPaycheckDateLabel = nextUpcomingPaycheck
     ? formatDueDate(nextUpcomingPaycheck.payDate)
@@ -4210,6 +4353,7 @@ export default function Home() {
         searchTerm === "" || event.name.toLowerCase().includes(searchTerm);
       return matchesType && matchesSearch;
     }) ?? [];
+  const recentCompletedTimelineEvents = completedTimelineEvents.slice(0, 5);
 
   return (
     <div className="relative min-h-screen bg-slate-950 font-sans text-white">
@@ -6200,7 +6344,7 @@ export default function Home() {
                                   </div>
                                 </div>
                               ) : (
-                                <div className="flex flex-col gap-3 sm:grid sm:grid-cols-[5rem_1fr_auto_auto_auto_auto] sm:items-center sm:gap-3">
+                                <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[5rem_1fr_auto_auto_auto] lg:items-center lg:gap-3">
                                   <span className="text-slate-400">
                                     {formatDueDate(event.date)}
                                   </span>
@@ -6231,22 +6375,42 @@ export default function Home() {
                                   <span className="font-semibold tabular-nums text-teal-200">
                                     ${runningBalance}
                                   </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => startEditTimelineEvent(event)}
-                                    aria-label={`Edit ${event.name}`}
-                                    className="justify-self-start rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-teal-500/40 hover:bg-teal-500/10 hover:text-teal-200 sm:justify-self-end"
-                                  >
-                                    Edit
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => deleteTimelineEvent(event)}
-                                    aria-label={`Delete ${event.name}`}
-                                    className={`${TOUCH_TARGET_BUTTON_CLASS} justify-self-start border-white/10 bg-white/5 font-semibold text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-200 sm:justify-self-end`}
-                                  >
-                                    Delete
-                                  </button>
+                                  <div className="flex flex-wrap gap-2 lg:justify-end">
+                                    <button
+                                      type="button"
+                                      onClick={() => completeTimelineEvent(event)}
+                                      aria-label={
+                                        event.type === "Income"
+                                          ? `Mark ${event.name} as received`
+                                          : `Mark ${event.name} as paid`
+                                      }
+                                      className={`${TOUCH_TARGET_BUTTON_CLASS} font-semibold transition ${
+                                        event.type === "Income"
+                                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:border-emerald-500/50 hover:bg-emerald-500/20"
+                                          : "border-teal-500/30 bg-teal-500/10 text-teal-200 hover:border-teal-500/50 hover:bg-teal-500/20"
+                                      }`}
+                                    >
+                                      {event.type === "Income"
+                                        ? "Mark as Received"
+                                        : "Mark as Paid"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => startEditTimelineEvent(event)}
+                                      aria-label={`Edit ${event.name}`}
+                                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-teal-500/40 hover:bg-teal-500/10 hover:text-teal-200"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => deleteTimelineEvent(event)}
+                                      aria-label={`Delete ${event.name}`}
+                                      className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 bg-white/5 font-semibold text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-200`}
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
                                 </div>
                               )}
                             </li>
@@ -6263,6 +6427,47 @@ export default function Home() {
                         paychecks, or manual events to populate your timeline.
                       </p>
                     )}
+
+                    {recentCompletedTimelineEvents.length > 0 ? (
+                      <div className="mt-6 border-t border-white/10 pt-5">
+                        <h4 className="text-sm font-semibold text-white">
+                          Recently Completed
+                        </h4>
+                        <ul className="mt-3 space-y-2">
+                          {recentCompletedTimelineEvents.map((event) => (
+                            <li
+                              key={event.id}
+                              className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm"
+                            >
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                  <p className="font-medium text-slate-200">
+                                    {event.name}
+                                  </p>
+                                  <p className="mt-1 text-xs text-slate-500">
+                                    {event.type === "Income"
+                                      ? "Received"
+                                      : "Paid"}{" "}
+                                    {formatDueDate(event.completedDate)} · Due{" "}
+                                    {formatDueDate(event.originalDueDate)}
+                                  </p>
+                                </div>
+                                <span
+                                  className={`font-semibold tabular-nums ${
+                                    event.type === "Income"
+                                      ? "text-emerald-300"
+                                      : "text-red-300"
+                                  }`}
+                                >
+                                  {event.type === "Income" ? "+" : "-"}$
+                                  {event.amount.toLocaleString()}
+                                </span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
 
                     <div
                       className={`rounded-xl border px-5 py-4 backdrop-blur-sm ${cashFlowStatusStyles[cashFlowProjection.status].border} ${cashFlowStatusStyles[cashFlowProjection.status].bg}`}
