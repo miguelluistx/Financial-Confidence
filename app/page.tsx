@@ -149,10 +149,29 @@ function getTimelineCompleteSuccessMessage(event: TimelineEvent): string {
     : `Marked ${event.name} as paid.`;
 }
 
-function getCompletedTimelineEventIdSet(
+function filterOutCompletedTimelineEvents(
+  events: TimelineEvent[],
   completedEvents: CompletedTimelineEvent[],
-): Set<string> {
-  return new Set(completedEvents.map((event) => event.sourceEventId));
+): TimelineEvent[] {
+  if (completedEvents.length === 0) return events;
+
+  const completedSourceEventIds = new Set(
+    completedEvents.map((entry) => entry.sourceEventId),
+  );
+
+  return events.filter((event) => !completedSourceEventIds.has(event.id));
+}
+
+function filterTimelineEventsByRange(
+  events: TimelineEvent[],
+  rangeEnd: Date,
+): TimelineEvent[] {
+  const todayISO = toISODate(new Date());
+  const rangeEndISO = toISODate(rangeEnd);
+
+  return events.filter(
+    (event) => event.date >= todayISO && event.date <= rangeEndISO,
+  );
 }
 
 function getNextUpcomingPaycheckFromEvents(
@@ -170,6 +189,209 @@ function getNextUpcomingPaycheckFromEvents(
     name: nextIncome.name,
     amount: nextIncome.amount,
   };
+}
+
+function getCompletedSourceInfo(source: TimelineEventSource): {
+  sourceId: string;
+  sourceType: CompletedTimelineSourceType;
+} {
+  switch (source.kind) {
+    case "bill":
+      return { sourceId: source.billId, sourceType: "bill" };
+    case "paycheck":
+      return { sourceId: source.paycheckId, sourceType: "paycheck" };
+    case "recurring":
+      return { sourceId: source.billId, sourceType: "recurring-bill" };
+    case "recurring-paycheck":
+      return {
+        sourceId: source.paycheckId,
+        sourceType: "recurring-paycheck",
+      };
+    case "manual":
+      return { sourceId: source.eventId, sourceType: "manual" };
+    case "planned-purchase":
+      return { sourceId: source.eventId, sourceType: "planned-purchase" };
+  }
+}
+
+function normalizeCompletedTimelineEvent(
+  event: CompletedTimelineEvent & {
+    sourceId?: string;
+    sourceType?: CompletedTimelineSourceType;
+  },
+): CompletedTimelineEvent {
+  const source = parseTimelineEventSource(event.sourceEventId);
+  if (source) {
+    return {
+      ...event,
+      ...getCompletedSourceInfo(source),
+    };
+  }
+
+  return {
+    ...event,
+    sourceId: event.sourceId ?? event.sourceEventId,
+    sourceType: event.sourceType ?? "manual",
+  };
+}
+
+function createCompletedTimelineEntry(
+  event: TimelineEvent,
+  source: TimelineEventSource,
+): CompletedTimelineEvent {
+  const { sourceId, sourceType } = getCompletedSourceInfo(source);
+
+  return {
+    id: crypto.randomUUID(),
+    sourceEventId: event.id,
+    sourceId,
+    sourceType,
+    name: event.name,
+    amount: event.amount,
+    type: event.type,
+    paid: true,
+    completedDate: toISODate(new Date()),
+    originalDueDate: event.date,
+  };
+}
+
+function isCompletedTimelineEvent(
+  sourceEventId: string,
+  sourceId: string,
+  sourceType: CompletedTimelineSourceType,
+  occurrenceDate: string,
+  completedEvents: CompletedTimelineEvent[],
+): boolean {
+  return completedEvents.some(
+    (entry) =>
+      entry.sourceEventId === sourceEventId ||
+      (entry.sourceId === sourceId &&
+        entry.sourceType === sourceType &&
+        entry.originalDueDate === occurrenceDate),
+  );
+}
+
+function getOneTimeBillStatus(
+  bill: PlannedBill,
+  completedEvents: CompletedTimelineEvent[],
+): OccurrenceStatus {
+  return isCompletedTimelineEvent(
+    `bill-${bill.id}`,
+    bill.id,
+    "bill",
+    bill.dueDate,
+    completedEvents,
+  )
+    ? "Paid"
+    : "Upcoming";
+}
+
+function getOneTimePaycheckStatus(
+  paycheck: PlannedPaycheck,
+  completedEvents: CompletedTimelineEvent[],
+): OccurrenceStatus {
+  return isCompletedTimelineEvent(
+    `paycheck-${paycheck.id}`,
+    paycheck.id,
+    "paycheck",
+    paycheck.payDate,
+    completedEvents,
+  )
+    ? "Received"
+    : "Upcoming";
+}
+
+function getRecurringOccurrenceStatus(
+  seriesId: string,
+  occurrenceDate: string,
+  sourceType: "recurring-bill" | "recurring-paycheck",
+  completedEvents: CompletedTimelineEvent[],
+  skippedDates: string[] | undefined,
+): OccurrenceStatus {
+  const sourceEventId =
+    sourceType === "recurring-bill"
+      ? `recurring-${seriesId}-${occurrenceDate}`
+      : `recurring-paycheck-${seriesId}-${occurrenceDate}`;
+
+  if (
+    isCompletedTimelineEvent(
+      sourceEventId,
+      seriesId,
+      sourceType,
+      occurrenceDate,
+      completedEvents,
+    )
+  ) {
+    return sourceType === "recurring-bill" ? "Paid" : "Received";
+  }
+
+  if (skippedDates?.includes(occurrenceDate)) {
+    return "Skipped";
+  }
+
+  return "Upcoming";
+}
+
+function getOccurrenceStatusLabel(status: OccurrenceStatus): string {
+  return status;
+}
+
+function getOccurrenceStatusClassName(status: OccurrenceStatus): string {
+  switch (status) {
+    case "Upcoming":
+      return "border-blue-500/30 bg-blue-500/10 text-blue-200";
+    case "Paid":
+    case "Received":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "Skipped":
+      return "border-slate-500/30 bg-slate-500/10 text-slate-400";
+  }
+}
+
+function getTimelineRangeEnd(
+  range: TimelineRange,
+  plannedPaychecks: PlannedPaycheck[],
+  recurringPaychecks: RecurringPaycheck[],
+): Date {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (range === "this-month") {
+    const endOfMonth = new Date(
+      today.getFullYear(),
+      today.getMonth() + 1,
+      0,
+      23,
+      59,
+      59,
+      999,
+    );
+    const nextPaycheck = getNextUpcomingPaycheck(
+      plannedPaychecks,
+      recurringPaychecks,
+    );
+
+    if (nextPaycheck) {
+      const [year, month, day] = nextPaycheck.payDate.split("-").map(Number);
+      const payDate = new Date(year, month - 1, day, 23, 59, 59, 999);
+      if (payDate > endOfMonth) {
+        return payDate;
+      }
+    }
+
+    return endOfMonth;
+  }
+
+  if (range === "all") {
+    return getFinancialTimelineHorizonEnd(plannedPaychecks, recurringPaychecks);
+  }
+
+  const days =
+    range === "30-days" ? 30 : range === "60-days" ? 60 : 90;
+  const end = new Date(today);
+  end.setDate(end.getDate() + days);
+  end.setHours(23, 59, 59, 999);
+  return end;
 }
 
 function getGoalProgressPercent(goal: SavingsGoal): number {
@@ -1288,6 +1510,8 @@ type TimelineEvent = {
 type CompletedTimelineEvent = {
   id: string;
   sourceEventId: string;
+  sourceId: string;
+  sourceType: CompletedTimelineSourceType;
   name: string;
   amount: number;
   type: TimelineEventType;
@@ -1295,6 +1519,23 @@ type CompletedTimelineEvent = {
   completedDate: string;
   originalDueDate: string;
 };
+
+type CompletedTimelineSourceType =
+  | "bill"
+  | "paycheck"
+  | "recurring-bill"
+  | "recurring-paycheck"
+  | "manual"
+  | "planned-purchase";
+
+type OccurrenceStatus = "Upcoming" | "Paid" | "Received" | "Skipped";
+
+type TimelineRange =
+  | "this-month"
+  | "30-days"
+  | "60-days"
+  | "90-days"
+  | "all";
 
 type CashFlowStatus = "risk" | "low" | "healthy";
 
@@ -1403,20 +1644,30 @@ function getNextUpcomingPaycheck(
   plannedPaychecks: PlannedPaycheck[],
   recurringPaychecks: RecurringPaycheck[] = [],
 ): UpcomingPaycheck | null {
-  const today = toISODate(new Date());
+  const todayISO = toISODate(new Date());
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const lookAheadEnd = new Date(today);
+  lookAheadEnd.setDate(lookAheadEnd.getDate() + 120);
+  lookAheadEnd.setHours(23, 59, 59, 999);
+  const normalizedRecurringPaychecks =
+    normalizeRecurringPaychecks(recurringPaychecks);
+
   const manual = plannedPaychecks
-    .filter((paycheck) => paycheck.payDate >= today)
+    .filter((paycheck) => paycheck.payDate >= todayISO)
     .map((paycheck) => ({
       payDate: paycheck.payDate,
       name: paycheck.name,
       amount: paycheck.amount,
     }));
-  const recurring = recurringPaychecks.flatMap((paycheck) =>
-    getRecurringPaycheckOccurrences(paycheck, today).map((payDate) => ({
-      payDate,
-      name: paycheck.name,
-      amount: paycheck.amount,
-    })),
+  const recurring = normalizedRecurringPaychecks.flatMap((paycheck) =>
+    getRecurringPaycheckOccurrencesInRange(paycheck, today, lookAheadEnd).map(
+      (payDate) => ({
+        payDate,
+        name: paycheck.name,
+        amount: paycheck.amount,
+      }),
+    ),
   );
   const upcoming = [...manual, ...recurring].sort((a, b) =>
     a.payDate.localeCompare(b.payDate),
@@ -1484,6 +1735,150 @@ function formatRecurringPaycheckSchedule(paycheck: RecurringPaycheck): string {
   return `${paycheck.frequency} · First pay ${formatDueDate(paycheck.firstPayDate)} · ${paycheck.futurePaycheckCount} paychecks`;
 }
 
+function normalizeRecurringPaycheck(
+  paycheck: RecurringPaycheck & {
+    payDate?: string;
+    firstPaycheckDate?: string;
+  },
+): RecurringPaycheck {
+  const firstPayDate =
+    paycheck.firstPayDate?.trim() ||
+    paycheck.payDate?.trim() ||
+    paycheck.firstPaycheckDate?.trim() ||
+    "";
+  const futurePaycheckCount =
+    typeof paycheck.futurePaycheckCount === "number"
+      ? paycheck.futurePaycheckCount
+      : Number(paycheck.futurePaycheckCount) || 6;
+
+  return {
+    ...paycheck,
+    firstPayDate,
+    futurePaycheckCount,
+  };
+}
+
+function normalizeRecurringPaychecks(
+  paychecks: RecurringPaycheck[] | undefined,
+): RecurringPaycheck[] {
+  if (!Array.isArray(paychecks)) return [];
+  return paychecks.map((paycheck) => normalizeRecurringPaycheck(paycheck));
+}
+
+function mergePersistedRecurringPaychecks(
+  saved: LegacyPersistedInput,
+): RecurringPaycheck[] {
+  const raw = saved.recurringPaychecks;
+  if (!Array.isArray(raw)) return [];
+
+  const fallbackFirstDate = saved.recurringPaycheckFirstPayDate?.trim() ?? "";
+
+  return raw.map((paycheck) =>
+    normalizeRecurringPaycheck({
+      ...paycheck,
+      firstPayDate:
+        paycheck.firstPayDate?.trim() ||
+        (paycheck as RecurringPaycheck & { payDate?: string }).payDate?.trim() ||
+        (paycheck as RecurringPaycheck & { firstPaycheckDate?: string })
+          .firstPaycheckDate?.trim() ||
+        fallbackFirstDate ||
+        "",
+    }),
+  );
+}
+
+function resolveTimelineRecurringPaychecks(
+  paychecks: RecurringPaycheck[],
+  fallbackFirstPayDate = "",
+): RecurringPaycheck[] {
+  const fallback = fallbackFirstPayDate.trim();
+  return normalizeRecurringPaychecks(paychecks).map((paycheck) => ({
+    ...paycheck,
+    firstPayDate: paycheck.firstPayDate || fallback,
+  }));
+}
+
+function ensureTimelineHorizonEnd(horizonEnd: Date): Date {
+  const end = new Date(horizonEnd);
+  end.setHours(23, 59, 59, 999);
+  return end;
+}
+
+function getFinancialTimelineHorizonEnd(
+  plannedPaychecks: PlannedPaycheck[],
+  recurringPaychecks: RecurringPaycheck[],
+): Date {
+  const normalizedRecurringPaychecks =
+    normalizeRecurringPaychecks(recurringPaychecks);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const minimumHorizon = new Date(today);
+  minimumHorizon.setDate(minimumHorizon.getDate() + 120);
+
+  const safeHorizon = getSafeToSpendHorizonEnd(
+    plannedPaychecks,
+    normalizedRecurringPaychecks,
+  );
+
+  return ensureTimelineHorizonEnd(
+    safeHorizon.getTime() >= minimumHorizon.getTime()
+      ? safeHorizon
+      : minimumHorizon,
+  );
+}
+
+function getRecurringPaycheckOccurrencesInRange(
+  paycheck: RecurringPaycheck,
+  start: Date,
+  end: Date,
+): string[] {
+  if (!paycheck.firstPayDate?.trim()) return [];
+
+  const dates: string[] = [];
+  const startDay = new Date(start);
+  startDay.setHours(0, 0, 0, 0);
+  const endDay = new Date(end);
+  endDay.setHours(23, 59, 59, 999);
+  const [year, month, day] = paycheck.firstPayDate.split("-").map(Number);
+  if ([year, month, day].some((value) => Number.isNaN(value))) return [];
+
+  const occurrence = new Date(year, month - 1, day);
+  occurrence.setHours(0, 0, 0, 0);
+  if (Number.isNaN(occurrence.getTime())) return [];
+
+  while (occurrence < startDay) {
+    advanceRecurringPaycheckDate(occurrence, paycheck.frequency, day);
+  }
+
+  let iterations = 0;
+  while (occurrence <= endDay && iterations < 200) {
+    iterations++;
+    dates.push(toISODate(occurrence));
+    advanceRecurringPaycheckDate(occurrence, paycheck.frequency, day);
+  }
+
+  return dates;
+}
+
+function buildRecurringPaycheckTimelineEvents(
+  recurringPaychecks: RecurringPaycheck[],
+  today: Date,
+  horizonEnd: Date,
+): TimelineEvent[] {
+  return recurringPaychecks.flatMap((paycheck) =>
+    getRecurringPaycheckOccurrencesInRange(paycheck, today, horizonEnd)
+      .filter((date) => !paycheck.skippedDates?.includes(date))
+      .map((date) => ({
+        id: `recurring-paycheck-${paycheck.id}-${date}`,
+        name: paycheck.name,
+        amount: paycheck.amount,
+        date,
+        type: "Income" as const,
+      })),
+  );
+}
+
 function getSafeToSpendHorizonEnd(
   plannedPaychecks: PlannedPaycheck[],
   recurringPaychecks: RecurringPaycheck[] = [],
@@ -1495,12 +1890,16 @@ function getSafeToSpendHorizonEnd(
   const horizonEnd = new Date(today);
   horizonEnd.setDate(horizonEnd.getDate() + 30);
 
+  const lookAheadEnd = new Date(today);
+  lookAheadEnd.setDate(lookAheadEnd.getDate() + 120);
+  lookAheadEnd.setHours(23, 59, 59, 999);
+
   const upcomingDates = [
     ...plannedPaychecks
       .filter((paycheck) => paycheck.payDate >= todayISO)
       .map((paycheck) => paycheck.payDate),
     ...recurringPaychecks.flatMap((paycheck) =>
-      getRecurringPaycheckOccurrences(paycheck, todayISO),
+      getRecurringPaycheckOccurrencesInRange(paycheck, today, lookAheadEnd),
     ),
   ].sort();
 
@@ -1544,12 +1943,15 @@ function buildFinancialTimelineEvents(
   recurringPaychecks: RecurringPaycheck[],
   timelineEvents: TimelineEvent[],
   horizonEnd: Date,
-  completedEventIds: Set<string> = new Set(),
+  completedEvents: CompletedTimelineEvent[] = [],
 ): TimelineEvent[] {
   const todayISO = toISODate(new Date());
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const horizonISO = toISODate(horizonEnd);
+  const horizonDay = ensureTimelineHorizonEnd(horizonEnd);
+  const horizonISO = toISODate(horizonDay);
+  const normalizedRecurringPaychecks =
+    normalizeRecurringPaychecks(recurringPaychecks);
 
   const billEvents: TimelineEvent[] = plannedBills
     .filter((bill) => bill.dueDate >= todayISO && bill.dueDate <= horizonISO)
@@ -1562,7 +1964,7 @@ function buildFinancialTimelineEvents(
     }));
 
   const recurringEvents = recurringBills.flatMap((bill) =>
-    getRecurringOccurrencesInRange(bill, today, horizonEnd)
+    getRecurringOccurrencesInRange(bill, today, horizonDay)
       .filter(
         (date) =>
           date <= horizonISO && !bill.skippedDates?.includes(date),
@@ -1589,29 +1991,28 @@ function buildFinancialTimelineEvents(
       type: "Income" as const,
     }));
 
-  const recurringPaycheckEvents = recurringPaychecks.flatMap((paycheck) =>
-    getRecurringPaycheckOccurrences(paycheck, todayISO, horizonISO).map(
-      (date) => ({
-        id: `recurring-paycheck-${paycheck.id}-${date}`,
-        name: paycheck.name,
-        amount: paycheck.amount,
-        date,
-        type: "Income" as const,
-      }),
-    ),
+  const recurringPaycheckEvents = buildRecurringPaycheckTimelineEvents(
+    normalizedRecurringPaychecks,
+    today,
+    horizonDay,
   );
 
   const manualEvents = timelineEvents.filter(
-    (event) => event.date >= todayISO && event.date <= horizonISO,
+    (event) =>
+      event.date >= todayISO &&
+      event.date <= horizonISO &&
+      !completedEvents.some((entry) => entry.sourceEventId === event.id),
   );
 
-  return [
+  const combinedEvents = sortTimelineEvents([
     ...billEvents,
     ...recurringEvents,
     ...manualPaycheckEvents,
     ...recurringPaycheckEvents,
     ...manualEvents,
-  ].filter((event) => !completedEventIds.has(event.id));
+  ]);
+
+  return filterOutCompletedTimelineEvents(combinedEvents, completedEvents);
 }
 
 function runFinancialTimeline(
@@ -1664,6 +2065,7 @@ function createDemoPersistedData(): PersistedAppData {
         amount: 1200,
         dueDay: 1,
         frequency: "Monthly",
+        firstDueDate: addDaysToISO(-10),
       },
       {
         id: "demo-bill-netflix",
@@ -1671,6 +2073,7 @@ function createDemoPersistedData(): PersistedAppData {
         amount: 15.99,
         dueDay: 12,
         frequency: "Monthly",
+        firstDueDate: addDaysToISO(4),
       },
       {
         id: "demo-bill-gym",
@@ -1678,6 +2081,7 @@ function createDemoPersistedData(): PersistedAppData {
         amount: 45,
         dueDay: 15,
         frequency: "Monthly",
+        firstDueDate: addDaysToISO(7),
       },
     ],
     recurringPaychecks: [
@@ -1821,15 +2225,57 @@ function getTotalMonthlyRecurringBills(bills: RecurringBill[]): number {
 }
 
 function formatRecurringDueDay(bill: RecurringBill): string {
+  if (bill.firstDueDate) {
+    return `First due ${formatDueDate(bill.firstDueDate)}`;
+  }
+
   if (bill.frequency === "Monthly") {
     return `Day ${bill.dueDay}`;
   }
 
-  if (bill.frequency === "Biweekly" && bill.firstDueDate) {
-    return `First due ${formatDueDate(bill.firstDueDate)}`;
-  }
-
   return WEEKDAYS[bill.dueDay] ?? `Day ${bill.dueDay}`;
+}
+
+function formatRecurringBillAmountLabel(bill: RecurringBill): string {
+  if (bill.frequency === "Monthly") return `$${bill.amount}/month`;
+  if (bill.frequency === "Biweekly") return `$${bill.amount}/biweekly`;
+  return `$${bill.amount}/week`;
+}
+
+function getUpcomingRecurringBillOccurrences(
+  bill: RecurringBill,
+  start: Date,
+  end: Date,
+  completedEvents: CompletedTimelineEvent[],
+): string[] {
+  return getRecurringOccurrencesInRange(bill, start, end).filter(
+    (date) =>
+      getRecurringOccurrenceStatus(
+        bill.id,
+        date,
+        "recurring-bill",
+        completedEvents,
+        bill.skippedDates,
+      ) === "Upcoming",
+  );
+}
+
+function getUpcomingRecurringPaycheckOccurrences(
+  paycheck: RecurringPaycheck,
+  start: Date,
+  end: Date,
+  completedEvents: CompletedTimelineEvent[],
+): string[] {
+  return getRecurringPaycheckOccurrencesInRange(paycheck, start, end).filter(
+    (date) =>
+      getRecurringOccurrenceStatus(
+        paycheck.id,
+        date,
+        "recurring-paycheck",
+        completedEvents,
+        paycheck.skippedDates,
+      ) === "Upcoming",
+  );
 }
 
 function getRecurringOccurrencesInRange(
@@ -1844,7 +2290,14 @@ function getRecurringOccurrencesInRange(
   endDay.setHours(23, 59, 59, 999);
 
   if (bill.frequency === "Monthly") {
-    const monthCursor = new Date(startDay.getFullYear(), startDay.getMonth(), 1);
+    const firstDueISO = bill.firstDueDate;
+    const monthCursor = firstDueISO
+      ? (() => {
+          const [year, month] = firstDueISO.split("-").map(Number);
+          return new Date(year, month - 1, 1);
+        })()
+      : new Date(startDay.getFullYear(), startDay.getMonth(), 1);
+
     while (monthCursor <= endDay) {
       const daysInMonth = new Date(
         monthCursor.getFullYear(),
@@ -1857,8 +2310,13 @@ function getRecurringOccurrencesInRange(
         monthCursor.getMonth(),
         day,
       );
-      if (occurrence >= startDay && occurrence <= endDay) {
-        dates.push(toISODate(occurrence));
+      const occurrenceISO = toISODate(occurrence);
+      if (
+        occurrence >= startDay &&
+        occurrence <= endDay &&
+        (!firstDueISO || occurrenceISO >= firstDueISO)
+      ) {
+        dates.push(occurrenceISO);
       }
       monthCursor.setMonth(monthCursor.getMonth() + 1);
     }
@@ -1880,6 +2338,25 @@ function getRecurringOccurrencesInRange(
     }
 
     return dates;
+  }
+
+  if (bill.frequency === "Weekly") {
+    if (bill.firstDueDate) {
+      const [year, month, day] = bill.firstDueDate.split("-").map(Number);
+      const occurrence = new Date(year, month - 1, day);
+      occurrence.setHours(0, 0, 0, 0);
+
+      while (occurrence < startDay) {
+        occurrence.setDate(occurrence.getDate() + 7);
+      }
+
+      while (occurrence <= endDay) {
+        dates.push(toISODate(occurrence));
+        occurrence.setDate(occurrence.getDate() + 7);
+      }
+
+      return dates;
+    }
   }
 
   const step = bill.frequency === "Weekly" ? 7 : 14;
@@ -2113,8 +2590,8 @@ const APP_LABELS = {
     nextPaycheck: "Next Paycheck",
     safeToSpend: "Safe To Spend",
     savingsGoal: "Savings Goal",
-    addBill: "Add Bill",
-    addPaycheck: "Add Paycheck",
+    addBill: "New Bill",
+    addPaycheck: "Save Paycheck",
     addCategory: "Add Category",
     addGoal: "Add Goal",
     knowBeforeYouBuy: "Know before you buy",
@@ -2135,8 +2612,8 @@ const APP_LABELS = {
     nextPaycheck: "Próximo Pago",
     safeToSpend: "Seguro para Gastar",
     savingsGoal: "Meta de Ahorro",
-    addBill: "Agregar Factura",
-    addPaycheck: "Agregar Pago",
+    addBill: "Nueva Factura",
+    addPaycheck: "Guardar Pago",
     addCategory: "Agregar Categoría",
     addGoal: "Agregar Meta",
     knowBeforeYouBuy: "Sabe antes de comprar",
@@ -2547,7 +3024,35 @@ export default function Home() {
   const [timelineFilter, setTimelineFilter] = useState<
     "all" | "income" | "expense"
   >("all");
+  const [timelineRange, setTimelineRange] = useState<TimelineRange>("this-month");
+  const [timelineDeletePrompt, setTimelineDeletePrompt] = useState<{
+    event: TimelineEvent;
+    source: TimelineEventSource;
+  } | null>(null);
   const [timelineSearch, setTimelineSearch] = useState("");
+  const [oneTimeBillsSectionExpanded, setOneTimeBillsSectionExpanded] =
+    useState(false);
+  const [recurringBillsSectionExpanded, setRecurringBillsSectionExpanded] =
+    useState(false);
+  const [billFormExpanded, setBillFormExpanded] = useState(false);
+  const [billActionMenuId, setBillActionMenuId] = useState<string | null>(null);
+  const [recurringBillDatesPanelId, setRecurringBillDatesPanelId] = useState<
+    string | null
+  >(null);
+  const [manualPaychecksSectionExpanded, setManualPaychecksSectionExpanded] =
+    useState(false);
+  const [recurringPaychecksSectionExpanded, setRecurringPaychecksSectionExpanded] =
+    useState(false);
+  const [paycheckFormExpanded, setPaycheckFormExpanded] = useState(false);
+  const [paycheckActionMenuId, setPaycheckActionMenuId] = useState<string | null>(
+    null,
+  );
+  const [recurringPaycheckSchedulePanelId, setRecurringPaycheckSchedulePanelId] =
+    useState<string | null>(null);
+  const [recentCompletedExpanded, setRecentCompletedExpanded] = useState(false);
+  const [timelineActionMenuId, setTimelineActionMenuId] = useState<
+    string | null
+  >(null);
   const [sectionOpen, setSectionOpen] = useState<Record<SectionKey, boolean>>({
     dashboardSummary: true,
     bills: false,
@@ -2815,7 +3320,11 @@ export default function Home() {
       legacySaved.savingsGoalCalculated || legacySaved.coachAdviceShown || false,
     );
     setTimelineEvents(legacySaved.timelineEvents ?? []);
-    setCompletedTimelineEvents(legacySaved.completedTimelineEvents ?? []);
+    setCompletedTimelineEvents(
+      (legacySaved.completedTimelineEvents ?? []).map(
+        normalizeCompletedTimelineEvent,
+      ),
+    );
     setEventName(legacySaved.eventName ?? "");
     setEventAmount(legacySaved.eventAmount ?? "");
     setEventDate(legacySaved.eventDate ?? "");
@@ -2826,12 +3335,16 @@ export default function Home() {
     setRecurringDueDay(legacySaved.recurringDueDay ?? "1");
     setRecurringFirstDueDate(legacySaved.recurringFirstDueDate ?? "");
     setRecurringFrequency(legacySaved.recurringFrequency ?? "Monthly");
-    setPlannedPaychecks(legacySaved.plannedPaychecks ?? []);
+    setPlannedPaychecks(
+      Array.isArray(legacySaved.plannedPaychecks)
+        ? legacySaved.plannedPaychecks
+        : [],
+    );
     setPaycheckName(legacySaved.paycheckName ?? "");
     setPaycheckAmount(legacySaved.paycheckAmount ?? "");
     setPaycheckDate(legacySaved.paycheckDate ?? "");
     setPaycheckFormType(legacySaved.paycheckFormType ?? "manual");
-    setRecurringPaychecks(legacySaved.recurringPaychecks ?? []);
+    setRecurringPaychecks(mergePersistedRecurringPaychecks(legacySaved));
     setRecurringPaycheckFrequency(
       legacySaved.recurringPaycheckFrequency ?? "Biweekly",
     );
@@ -2940,10 +3453,25 @@ export default function Home() {
     };
   }, []);
 
-  const totalUpcomingBills = plannedBills.reduce(
-    (sum, bill) => sum + bill.amount,
-    0,
-  );
+  const totalUpcomingBills = plannedBills
+    .filter(
+      (bill) =>
+        getOneTimeBillStatus(bill, completedTimelineEvents) === "Upcoming",
+    )
+    .reduce((sum, bill) => sum + bill.amount, 0);
+  const upcomingPlannedBills = plannedBills
+    .filter(
+      (bill) =>
+        getOneTimeBillStatus(bill, completedTimelineEvents) === "Upcoming",
+    )
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const upcomingPlannedPaychecks = plannedPaychecks
+    .filter(
+      (paycheck) =>
+        getOneTimePaycheckStatus(paycheck, completedTimelineEvents) ===
+        "Upcoming",
+    )
+    .sort((a, b) => a.payDate.localeCompare(b.payDate));
 
   const totalMonthlyRecurringBills = getTotalMonthlyRecurringBills(recurringBills);
   const checkingBalanceAmount = Number(checkingBalance) || 0;
@@ -2963,30 +3491,142 @@ export default function Home() {
     plannedPaychecks.length > 0 ||
     recurringPaychecks.length > 0;
 
-  const timelineHorizonEnd = getSafeToSpendHorizonEnd(
-    plannedPaychecks,
+  const timelineRecurringPaychecks = resolveTimelineRecurringPaychecks(
     recurringPaychecks,
+    recurringPaycheckFirstPayDate,
   );
-  const completedTimelineEventIds =
-    getCompletedTimelineEventIdSet(completedTimelineEvents);
+  const timelineHorizonEnd = getFinancialTimelineHorizonEnd(
+    plannedPaychecks,
+    timelineRecurringPaychecks,
+  );
   const unifiedTimelineEvents = buildFinancialTimelineEvents(
     plannedBills,
     recurringBills,
     plannedPaychecks,
-    recurringPaychecks,
+    timelineRecurringPaychecks,
     timelineEvents,
     timelineHorizonEnd,
-    completedTimelineEventIds,
+    completedTimelineEvents,
   );
+  const timelineViewHorizonEnd = getTimelineRangeEnd(
+    timelineRange,
+    plannedPaychecks,
+    timelineRecurringPaychecks,
+  );
+  const timelineViewEvents = filterTimelineEventsByRange(
+    unifiedTimelineEvents,
+    timelineViewHorizonEnd,
+  );
+  const timelineStartingBalance =
+    checkingBalance !== "" ? checkingBalanceAmount : 0;
+
+  const timelineViewCalculation =
+    checkingBalance !== "" || timelineViewEvents.length > 0 || hasCoreSetupData
+      ? runFinancialCalculation(timelineStartingBalance, timelineViewEvents)
+      : null;
+
+  useEffect(() => {
+    if (!isHydrated) return;
+
+    console.log("[timeline-debug]", {
+      plannedPaychecks: plannedPaychecks.length,
+      recurringPaychecks: recurringPaychecks.length,
+      resolvedRecurringPaychecks: timelineRecurringPaychecks.filter(
+        (paycheck) => paycheck.firstPayDate !== "",
+      ).length,
+      generatedIncomeEvents: unifiedTimelineEvents.filter(
+        (event) => event.type === "Income",
+      ).length,
+      generatedExpenseEvents: unifiedTimelineEvents.filter(
+        (event) => event.type === "Expense",
+      ).length,
+      viewIncomeEvents: timelineViewEvents.filter(
+        (event) => event.type === "Income",
+      ).length,
+      finalTimelineEvents: timelineViewEvents.length,
+      projectionRows: timelineViewCalculation?.rows.length ?? 0,
+      projectionIncomeRows:
+        timelineViewCalculation?.rows.filter(
+          (row) => row.event.type === "Income",
+        ).length ?? 0,
+      checkingBalance,
+      completedTimelineEvents: completedTimelineEvents.length,
+      timelineRange,
+      timelineFilter,
+    });
+  }, [
+    isHydrated,
+    plannedPaychecks,
+    recurringPaychecks,
+    timelineRecurringPaychecks,
+    unifiedTimelineEvents,
+    timelineViewEvents,
+    timelineViewCalculation,
+    checkingBalance,
+    completedTimelineEvents,
+    timelineRange,
+    timelineFilter,
+  ]);
+
+  useEffect(() => {
+    if (!billActionMenuId) return;
+
+    const closeMenu = () => setBillActionMenuId(null);
+    const timer = window.setTimeout(() => {
+      window.addEventListener("click", closeMenu);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("click", closeMenu);
+    };
+  }, [billActionMenuId]);
+
+  useEffect(() => {
+    if (!paycheckActionMenuId) return;
+
+    const closeMenu = () => setPaycheckActionMenuId(null);
+    const timer = window.setTimeout(() => {
+      window.addEventListener("click", closeMenu);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("click", closeMenu);
+    };
+  }, [paycheckActionMenuId]);
+
+  useEffect(() => {
+    if (!timelineActionMenuId) return;
+
+    const closeMenu = () => setTimelineActionMenuId(null);
+    const timer = window.setTimeout(() => {
+      window.addEventListener("click", closeMenu);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("click", closeMenu);
+    };
+  }, [timelineActionMenuId]);
 
   const financialCalculation =
     checkingBalance !== "" || unifiedTimelineEvents.length > 0
-      ? runFinancialCalculation(checkingBalanceAmount, unifiedTimelineEvents)
+      ? runFinancialCalculation(timelineStartingBalance, unifiedTimelineEvents)
       : null;
 
   const effectiveSafeToSpend = financialCalculation?.safeToSpend ?? 0;
   const cashShortfallDetected = financialCalculation?.hasShortfall ?? false;
-  const cashFlowProjection = financialCalculation;
+  const timelineViewProjection = timelineViewCalculation;
+  const timelineDisplayStartingBalance =
+    checkingBalance !== ""
+      ? checkingBalanceAmount
+      : (timelineViewProjection?.startingBalance ?? 0);
+  const timelineDisplayLowestBalance =
+    timelineViewProjection?.lowestBalanceBeforeNextPaycheck ??
+    timelineDisplayStartingBalance;
+  const timelineDisplayEndingBalance =
+    timelineViewProjection?.endingBalance ?? timelineDisplayStartingBalance;
 
   useEffect(() => {
     const saved = loadPersistedData();
@@ -3385,8 +4025,10 @@ export default function Home() {
       ]);
     }
 
+    const wasEditing = Boolean(editingBillId);
     resetBillFormFields();
-    showActionMessage(editingBillId ? "Bill updated." : "Bill added.");
+    setBillFormExpanded(false);
+    showActionMessage(wasEditing ? "Bill updated." : "Bill added.");
   };
 
   const saveRecurringBill = () => {
@@ -3394,55 +4036,30 @@ export default function Home() {
     const amount = Number(billAmount);
     const firstDueDate = recurringFirstDueDate.trim();
 
-    if (!name || Number.isNaN(amount) || amount <= 0) return;
+    if (!name || !firstDueDate || Number.isNaN(amount) || amount <= 0) return;
 
-    let dueDay: number;
-    let billFirstDueDate: string | undefined;
+    const [year, month, day] = firstDueDate.split("-").map(Number);
+    const anchor = new Date(year, month - 1, day);
+    if (Number.isNaN(anchor.getTime())) return;
 
-    if (recurringFrequency === "Monthly") {
-      dueDay = Number(recurringDueDay);
-      if (Number.isNaN(dueDay) || dueDay < 1 || dueDay > 31) return;
-    } else if (recurringFrequency === "Weekly") {
-      dueDay = Number(recurringDueDay);
-      if (Number.isNaN(dueDay) || dueDay < 0 || dueDay > 6) return;
-    } else {
-      if (!firstDueDate) return;
-      const [year, month, day] = firstDueDate.split("-").map(Number);
-      const anchor = new Date(year, month - 1, day);
-      if (Number.isNaN(anchor.getTime())) return;
-      dueDay = anchor.getDay();
-      billFirstDueDate = firstDueDate;
-    }
+    const dueDay =
+      recurringFrequency === "Monthly" ? day : anchor.getDay();
 
     const recurringPayload = {
       name,
       amount,
       dueDay,
       frequency: recurringFrequency,
-      ...(billFirstDueDate ? { firstDueDate: billFirstDueDate } : {}),
+      firstDueDate,
     };
 
     if (editingRecurringBillId) {
       setRecurringBills((prev) =>
-        prev.map((bill) => {
-          if (bill.id !== editingRecurringBillId) return bill;
-
-          const updated: RecurringBill = {
-            ...bill,
-            name,
-            amount,
-            dueDay,
-            frequency: recurringFrequency,
-          };
-
-          if (billFirstDueDate) {
-            updated.firstDueDate = billFirstDueDate;
-          } else {
-            delete updated.firstDueDate;
-          }
-
-          return updated;
-        }),
+        prev.map((bill) =>
+          bill.id === editingRecurringBillId
+            ? { ...bill, ...recurringPayload }
+            : bill,
+        ),
       );
     } else {
       setRecurringBills((prev) => [
@@ -3451,12 +4068,17 @@ export default function Home() {
       ]);
     }
 
+    const wasEditing = Boolean(editingRecurringBillId);
     resetBillFormFields();
+    setBillFormExpanded(false);
     showActionMessage(
-      editingRecurringBillId
-        ? "Recurring bill updated."
-        : "Recurring bill added.",
+      wasEditing ? "Recurring bill updated." : "Recurring bill added.",
     );
+  };
+
+  const closeBillForm = () => {
+    resetBillFormFields();
+    setBillFormExpanded(false);
   };
 
   const saveBill = () => {
@@ -3474,6 +4096,7 @@ export default function Home() {
     setBillName(bill.name);
     setBillAmount(String(bill.amount));
     setBillDueDate(bill.dueDate);
+    setBillFormExpanded(true);
   };
 
   const removeBill = (id: string, options?: { skipConfirm?: boolean }) => {
@@ -3492,6 +4115,7 @@ export default function Home() {
     setPlannedBills((prev) => prev.filter((item) => item.id !== id));
     if (editingBillId === id) {
       resetBillFormFields();
+      setBillFormExpanded(false);
     }
 
     if (!options?.skipConfirm) {
@@ -3513,13 +4137,18 @@ export default function Home() {
           ? getNextWeekdayISO(bill.dueDay)
           : ""),
     );
+    setBillFormExpanded(true);
   };
 
-  const removeRecurringBill = (id: string) => {
+  const removeRecurringBill = (
+    id: string,
+    options?: { skipConfirm?: boolean },
+  ) => {
     const bill = recurringBills.find((item) => item.id === id);
     if (!bill) return;
 
     if (
+      !options?.skipConfirm &&
       !confirmAction(
         `Delete recurring bill "${bill.name}"? This removes all future occurrences.`,
       )
@@ -3530,8 +4159,11 @@ export default function Home() {
     setRecurringBills((prev) => prev.filter((item) => item.id !== id));
     if (editingRecurringBillId === id) {
       resetBillFormFields();
+      setBillFormExpanded(false);
     }
-    showActionMessage(`Deleted ${bill.name}.`);
+    if (!options?.skipConfirm) {
+      showActionMessage(`Deleted ${bill.name}.`);
+    }
   };
 
   const resetPaycheckFormFields = () => {
@@ -3573,9 +4205,11 @@ export default function Home() {
       ]);
     }
 
+    const wasEditing = Boolean(editingPaycheckId);
     resetPaycheckFormFields();
+    setPaycheckFormExpanded(false);
     showActionMessage(
-      editingPaycheckId ? "Paycheck updated." : "Paycheck added.",
+      wasEditing ? "Paycheck updated." : "Paycheck added.",
     );
   };
 
@@ -3619,12 +4253,17 @@ export default function Home() {
       ]);
     }
 
+    const wasEditing = Boolean(editingRecurringPaycheckId);
     resetPaycheckFormFields();
+    setPaycheckFormExpanded(false);
     showActionMessage(
-      editingRecurringPaycheckId
-        ? "Recurring paycheck updated."
-        : "Recurring paycheck added.",
+      wasEditing ? "Recurring paycheck updated." : "Recurring paycheck added.",
     );
+  };
+
+  const closePaycheckForm = () => {
+    resetPaycheckFormFields();
+    setPaycheckFormExpanded(false);
   };
 
   const savePaycheck = () => {
@@ -3642,6 +4281,7 @@ export default function Home() {
     setPaycheckName(paycheck.name);
     setPaycheckAmount(String(paycheck.amount));
     setPaycheckDate(paycheck.payDate);
+    setPaycheckFormExpanded(true);
   };
 
   const removePaycheck = (id: string, options?: { skipConfirm?: boolean }) => {
@@ -3660,6 +4300,7 @@ export default function Home() {
     setPlannedPaychecks((prev) => prev.filter((item) => item.id !== id));
     if (editingPaycheckId === id) {
       resetPaycheckFormFields();
+      setPaycheckFormExpanded(false);
     }
 
     if (!options?.skipConfirm) {
@@ -3676,13 +4317,18 @@ export default function Home() {
     setRecurringPaycheckFrequency(paycheck.frequency);
     setRecurringPaycheckFirstPayDate(paycheck.firstPayDate);
     setRecurringPaycheckFutureCount(String(paycheck.futurePaycheckCount));
+    setPaycheckFormExpanded(true);
   };
 
-  const removeRecurringPaycheck = (id: string) => {
+  const removeRecurringPaycheck = (
+    id: string,
+    options?: { skipConfirm?: boolean },
+  ) => {
     const paycheck = recurringPaychecks.find((item) => item.id === id);
     if (!paycheck) return;
 
     if (
+      !options?.skipConfirm &&
       !confirmAction(
         `Delete recurring paycheck "${paycheck.name}"? This removes all future occurrences.`,
       )
@@ -3693,8 +4339,11 @@ export default function Home() {
     setRecurringPaychecks((prev) => prev.filter((item) => item.id !== id));
     if (editingRecurringPaycheckId === id) {
       resetPaycheckFormFields();
+      setPaycheckFormExpanded(false);
     }
-    showActionMessage(`Deleted ${paycheck.name}.`);
+    if (!options?.skipConfirm) {
+      showActionMessage(`Deleted ${paycheck.name}.`);
+    }
   };
 
   const resetSpendingCategoryFormFields = () => {
@@ -3957,14 +4606,50 @@ export default function Home() {
     setEditTimelineType(event.type);
   };
 
-  const deleteTimelineEvent = (event: TimelineEvent) => {
-    const source = parseTimelineEventSource(event.id);
-    if (!source) return;
-
-    if (!confirmAction(getTimelineDeleteConfirmMessage(event, source))) {
+  const skipRecurringTimelineOccurrence = (source: TimelineEventSource) => {
+    if (source.kind === "recurring") {
+      setRecurringBills((prev) =>
+        prev.map((bill) =>
+          bill.id === source.billId
+            ? {
+                ...bill,
+                skippedDates: Array.from(
+                  new Set([
+                    ...(bill.skippedDates ?? []),
+                    source.occurrenceDate,
+                  ]),
+                ),
+              }
+            : bill,
+        ),
+      );
       return;
     }
 
+    if (source.kind === "recurring-paycheck") {
+      setRecurringPaychecks((prev) =>
+        prev.map((paycheck) =>
+          paycheck.id === source.paycheckId
+            ? {
+                ...paycheck,
+                skippedDates: Array.from(
+                  new Set([
+                    ...(paycheck.skippedDates ?? []),
+                    source.occurrenceDate,
+                  ]),
+                ),
+              }
+            : paycheck,
+        ),
+      );
+    }
+  };
+
+  const executeTimelineDelete = (
+    event: TimelineEvent,
+    source: TimelineEventSource,
+    mode: "occurrence" | "series" | "source",
+  ) => {
     switch (source.kind) {
       case "bill":
         removeBill(source.billId, { skipConfirm: true });
@@ -3973,38 +4658,18 @@ export default function Home() {
         removePaycheck(source.paycheckId, { skipConfirm: true });
         break;
       case "recurring":
-        setRecurringBills((prev) =>
-          prev.map((bill) =>
-            bill.id === source.billId
-              ? {
-                  ...bill,
-                  skippedDates: Array.from(
-                    new Set([
-                      ...(bill.skippedDates ?? []),
-                      source.occurrenceDate,
-                    ]),
-                  ),
-                }
-              : bill,
-          ),
-        );
+        if (mode === "series") {
+          removeRecurringBill(source.billId, { skipConfirm: true });
+        } else {
+          skipRecurringTimelineOccurrence(source);
+        }
         break;
       case "recurring-paycheck":
-        setRecurringPaychecks((prev) =>
-          prev.map((paycheck) =>
-            paycheck.id === source.paycheckId
-              ? {
-                  ...paycheck,
-                  skippedDates: Array.from(
-                    new Set([
-                      ...(paycheck.skippedDates ?? []),
-                      source.occurrenceDate,
-                    ]),
-                  ),
-                }
-              : paycheck,
-          ),
-        );
+        if (mode === "series") {
+          removeRecurringPaycheck(source.paycheckId, { skipConfirm: true });
+        } else {
+          skipRecurringTimelineOccurrence(source);
+        }
         break;
       case "planned-purchase":
       case "manual":
@@ -4021,6 +4686,22 @@ export default function Home() {
     showActionMessage(`Removed ${event.name} from timeline.`);
   };
 
+  const deleteTimelineEvent = (event: TimelineEvent) => {
+    const source = parseTimelineEventSource(event.id);
+    if (!source) return;
+
+    if (source.kind === "recurring" || source.kind === "recurring-paycheck") {
+      setTimelineDeletePrompt({ event, source });
+      return;
+    }
+
+    if (!confirmAction(getTimelineDeleteConfirmMessage(event, source))) {
+      return;
+    }
+
+    executeTimelineDelete(event, source, "source");
+  };
+
   const completeTimelineEvent = (event: TimelineEvent) => {
     const source = parseTimelineEventSource(event.id);
     if (!source) return;
@@ -4029,18 +4710,7 @@ export default function Home() {
       return;
     }
 
-    const completedDate = toISODate(new Date());
-    const completedEntry: CompletedTimelineEvent = {
-      id: crypto.randomUUID(),
-      sourceEventId: event.id,
-      name: event.name,
-      amount: event.amount,
-      type: event.type,
-      paid: true,
-      completedDate,
-      originalDueDate: event.date,
-    };
-
+    const completedEntry = createCompletedTimelineEntry(event, source);
     setCompletedTimelineEvents((prev) => [completedEntry, ...prev]);
 
     const balanceDelta =
@@ -4053,38 +4723,8 @@ export default function Home() {
 
     switch (source.kind) {
       case "recurring":
-        setRecurringBills((prev) =>
-          prev.map((bill) =>
-            bill.id === source.billId
-              ? {
-                  ...bill,
-                  skippedDates: Array.from(
-                    new Set([
-                      ...(bill.skippedDates ?? []),
-                      source.occurrenceDate,
-                    ]),
-                  ),
-                }
-              : bill,
-          ),
-        );
-        break;
       case "recurring-paycheck":
-        setRecurringPaychecks((prev) =>
-          prev.map((paycheck) =>
-            paycheck.id === source.paycheckId
-              ? {
-                  ...paycheck,
-                  skippedDates: Array.from(
-                    new Set([
-                      ...(paycheck.skippedDates ?? []),
-                      source.occurrenceDate,
-                    ]),
-                  ),
-                }
-              : paycheck,
-          ),
-        );
+        skipRecurringTimelineOccurrence(source);
         break;
       case "bill":
       case "paycheck":
@@ -4098,6 +4738,62 @@ export default function Home() {
     }
 
     showActionMessage(getTimelineCompleteSuccessMessage(event));
+  };
+
+  const markPlannedBillAsPaid = (bill: PlannedBill) => {
+    completeTimelineEvent({
+      id: `bill-${bill.id}`,
+      name: bill.name,
+      amount: bill.amount,
+      date: bill.dueDate,
+      type: "Expense",
+    });
+  };
+
+  const markRecurringBillOccurrenceAsPaid = (
+    bill: RecurringBill,
+    occurrenceDate: string,
+  ) => {
+    completeTimelineEvent({
+      id: `recurring-${bill.id}-${occurrenceDate}`,
+      name: bill.name,
+      amount: bill.amount,
+      date: occurrenceDate,
+      type: "Expense",
+    });
+  };
+
+  const markPlannedPaycheckAsReceived = (paycheck: PlannedPaycheck) => {
+    completeTimelineEvent({
+      id: `paycheck-${paycheck.id}`,
+      name: paycheck.name,
+      amount: paycheck.amount,
+      date: paycheck.payDate,
+      type: "Income",
+    });
+  };
+
+  const markRecurringPaycheckOccurrenceAsReceived = (
+    paycheck: RecurringPaycheck,
+    occurrenceDate: string,
+  ) => {
+    completeTimelineEvent({
+      id: `recurring-paycheck-${paycheck.id}-${occurrenceDate}`,
+      name: paycheck.name,
+      amount: paycheck.amount,
+      date: occurrenceDate,
+      type: "Income",
+    });
+  };
+
+  const toggleRecurringBillDatesPanel = (billId: string) => {
+    setRecurringBillDatesPanelId((prev) => (prev === billId ? null : billId));
+  };
+
+  const toggleRecurringPaycheckSchedulePanel = (paycheckId: string) => {
+    setRecurringPaycheckSchedulePanelId((prev) =>
+      prev === paycheckId ? null : paycheckId,
+    );
   };
 
   const saveEditTimelineEvent = () => {
@@ -4317,7 +5013,7 @@ export default function Home() {
   );
   const dashboardCashFlowLabel = dashboardCashFlow.status;
 
-  const timelineTotals = unifiedTimelineEvents.reduce(
+  const timelineTotals = timelineViewEvents.reduce(
     (acc, event) => {
       if (event.type === "Income") {
         acc.income += event.amount;
@@ -4328,10 +5024,12 @@ export default function Home() {
     },
     { income: 0, expenses: 0 },
   );
-  const timelineAvailableCash = cashFlowProjection
-    ? cashFlowProjection.startingBalance + timelineTotals.income
-    : 0;
-  const timelineRemainingCash = cashFlowProjection?.endingBalance ?? 0;
+  const timelineAvailableCash =
+    timelineDisplayStartingBalance + timelineTotals.income;
+  const timelineRemainingCash = timelineDisplayEndingBalance;
+  const timelineRowByEventId = new Map(
+    (timelineViewProjection?.rows ?? []).map((row) => [row.event.id, row]),
+  );
 
   const totalSpendingBudget = getTotalMonthlySpendingBudget(spendingCategories);
   const totalSpendingSpent = getTotalMonthlySpendingSpent(spendingCategories);
@@ -4342,8 +5040,8 @@ export default function Home() {
   const activeSpendingCategoryCount =
     getActiveSpendingCategoryCount(spendingCategories);
 
-  const visibleTimelineRows =
-    cashFlowProjection?.rows.filter(({ event }) => {
+  const visibleTimelineRows = sortTimelineEvents(
+    timelineViewEvents.filter((event) => {
       const matchesType =
         timelineFilter === "all" ||
         (timelineFilter === "income" && event.type === "Income") ||
@@ -4352,8 +5050,86 @@ export default function Home() {
       const matchesSearch =
         searchTerm === "" || event.name.toLowerCase().includes(searchTerm);
       return matchesType && matchesSearch;
-    }) ?? [];
+    }),
+  ).map((event) => ({
+    event,
+    runningBalance:
+      timelineRowByEventId.get(event.id)?.runningBalance ??
+      timelineDisplayStartingBalance,
+  }));
+  const groupedVisibleTimelineRows = (() => {
+    const groupMap = new Map<string, typeof visibleTimelineRows>();
+    for (const row of visibleTimelineRows) {
+      const existing = groupMap.get(row.event.date);
+      if (existing) {
+        existing.push(row);
+      } else {
+        groupMap.set(row.event.date, [row]);
+      }
+    }
+    return [...groupMap.entries()]
+      .sort(([dateA], [dateB]) => dateA.localeCompare(dateB))
+      .map(([date, rows]) => ({ date, rows }));
+  })();
+  const timelineIncomeEventCount = timelineViewEvents.filter(
+    (event) => event.type === "Income",
+  ).length;
+  const timelineExpenseEventCount = timelineViewEvents.filter(
+    (event) => event.type === "Expense",
+  ).length;
+  const billsOccurrenceHorizonEnd = getTimelineRangeEnd(
+    "90-days",
+    plannedPaychecks,
+    recurringPaychecks,
+  );
+  const paycheckOccurrenceHorizonEnd = billsOccurrenceHorizonEnd;
+  const billsOccurrenceStart = (() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return today;
+  })();
+  const sortedRecurringBills = [...recurringBills].sort((a, b) => {
+    const aNext =
+      getUpcomingRecurringBillOccurrences(
+        a,
+        billsOccurrenceStart,
+        billsOccurrenceHorizonEnd,
+        completedTimelineEvents,
+      )[0] ?? "9999-12-31";
+    const bNext =
+      getUpcomingRecurringBillOccurrences(
+        b,
+        billsOccurrenceStart,
+        billsOccurrenceHorizonEnd,
+        completedTimelineEvents,
+      )[0] ?? "9999-12-31";
+    return aNext.localeCompare(bNext);
+  });
+  const sortedRecurringPaychecks = [...recurringPaychecks].sort((a, b) => {
+    const aNext =
+      getUpcomingRecurringPaycheckOccurrences(
+        a,
+        billsOccurrenceStart,
+        paycheckOccurrenceHorizonEnd,
+        completedTimelineEvents,
+      )[0] ?? "9999-12-31";
+    const bNext =
+      getUpcomingRecurringPaycheckOccurrences(
+        b,
+        billsOccurrenceStart,
+        paycheckOccurrenceHorizonEnd,
+        completedTimelineEvents,
+      )[0] ?? "9999-12-31";
+    return aNext.localeCompare(bNext);
+  });
   const recentCompletedTimelineEvents = completedTimelineEvents.slice(0, 5);
+  const timelineRangeOptions: { value: TimelineRange; label: string }[] = [
+    { value: "this-month", label: "This month" },
+    { value: "30-days", label: "Next 30 days" },
+    { value: "60-days", label: "Next 60 days" },
+    { value: "90-days", label: "Next 90 days" },
+    { value: "all", label: "All upcoming" },
+  ];
 
   return (
     <div className="relative min-h-screen bg-slate-950 font-sans text-white">
@@ -4594,7 +5370,7 @@ export default function Home() {
 
           {/* Calculator */}
           <section className="min-w-0">
-            <div className="space-y-4 overflow-x-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-4 shadow-2xl shadow-black/40 backdrop-blur-xl sm:p-6 lg:p-8">
+            <div className="space-y-2 overflow-x-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-4 shadow-2xl shadow-black/40 backdrop-blur-xl sm:p-6 lg:p-8">
               {actionMessage ? (
                 <div
                   role="status"
@@ -4800,7 +5576,7 @@ export default function Home() {
               <CollapsibleSection
                 id="bills"
                 title={labels.bills}
-                subtitle="Manage one-time and recurring bills"
+                subtitle="Track your bills and due dates."
                 iconClassName="bg-amber-600/20 text-amber-400"
                 isOpen={sectionOpen.bills}
                 onToggle={() => toggleSection("bills")}
@@ -4821,18 +5597,23 @@ export default function Home() {
                   </svg>
                 }
               >
-                <div className="space-y-6">
-                  <p className="text-sm leading-relaxed text-slate-400">
-                    Bills feed your Cash Flow Timeline and Safe To Spend. Add
-                    one-time or recurring bills to keep projections accurate.
-                  </p>
-                  <form
-                    className="space-y-4"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      saveBill();
-                    }}
-                  >
+                <div className="space-y-2">
+                  {!billFormExpanded ? (
+                    <button
+                      type="button"
+                      onClick={() => setBillFormExpanded(true)}
+                      className="flex w-full items-center justify-center rounded-lg border border-dashed border-amber-500/30 bg-amber-500/5 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:border-amber-500/50 hover:bg-amber-500/10 focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                    >
+                      + New Bill
+                    </button>
+                  ) : (
+                    <form
+                      className="space-y-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 transition-all duration-200 sm:p-4"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        saveBill();
+                      }}
+                    >
                     <fieldset>
                       <legend className="mb-2 block text-sm font-medium text-slate-300">
                         Bill Type
@@ -4933,12 +5714,7 @@ export default function Home() {
                             onChange={(e) => {
                               const frequency = e.target.value as RecurringFrequency;
                               setRecurringFrequency(frequency);
-                              if (frequency === "Monthly") {
-                                setRecurringDueDay("1");
-                              } else if (frequency === "Weekly") {
-                                setRecurringDueDay("1");
-                                setRecurringFirstDueDate("");
-                              } else {
+                              if (!editingRecurringBillId) {
                                 setRecurringFirstDueDate("");
                               }
                             }}
@@ -4950,199 +5726,318 @@ export default function Home() {
                           </select>
                         </div>
 
-                        {recurringFrequency === "Monthly" ? (
-                          <div>
-                            <label
-                              htmlFor="recurring-due-day"
-                              className="mb-2 block text-sm font-medium text-slate-300"
-                            >
-                              Due Day
-                            </label>
-                            <input
-                              id="recurring-due-day"
-                              type="number"
-                              min="1"
-                              max="31"
-                              step="1"
-                              placeholder="1"
-                              value={recurringDueDay}
-                              onChange={(e) => setRecurringDueDay(e.target.value)}
-                              className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-amber-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-amber-500/20"
-                            />
-                          </div>
-                        ) : null}
-
-                        {recurringFrequency === "Weekly" ? (
-                          <div>
-                            <label
-                              htmlFor="recurring-weekday"
-                              className="mb-2 block text-sm font-medium text-slate-300"
-                            >
-                              Day of Week
-                            </label>
-                            <select
-                              id="recurring-weekday"
-                              value={recurringDueDay}
-                              onChange={(e) => setRecurringDueDay(e.target.value)}
-                              className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-amber-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-amber-500/20"
-                            >
-                              {WEEKDAYS.map((day, index) => (
-                                <option key={day} value={index}>
-                                  {day}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        ) : null}
-
-                        {recurringFrequency === "Biweekly" ? (
-                          <div>
-                            <label
-                              htmlFor="recurring-first-due-date"
-                              className="mb-2 block text-sm font-medium text-slate-300"
-                            >
-                              First Due Date
-                            </label>
-                            <input
-                              id="recurring-first-due-date"
-                              type="date"
-                              value={recurringFirstDueDate}
-                              onChange={(e) =>
-                                setRecurringFirstDueDate(e.target.value)
-                              }
-                              className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-amber-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-amber-500/20 [color-scheme:dark]"
-                            />
-                          </div>
-                        ) : null}
+                        <div>
+                          <label
+                            htmlFor="recurring-first-due-date"
+                            className="mb-2 block text-sm font-medium text-slate-300"
+                          >
+                            Start Date / First Due Date
+                          </label>
+                          <input
+                            id="recurring-first-due-date"
+                            type="date"
+                            value={recurringFirstDueDate}
+                            onChange={(e) =>
+                              setRecurringFirstDueDate(e.target.value)
+                            }
+                            className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-amber-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-amber-500/20 [color-scheme:dark]"
+                          />
+                        </div>
                       </>
                     )}
 
                     <button
                       type="submit"
-                      className="w-full rounded-xl border border-amber-500/40 bg-amber-600/20 py-3.5 text-sm font-semibold text-amber-300 transition hover:border-amber-500/60 hover:bg-amber-600/30 focus:outline-none focus:ring-2 focus:ring-amber-500/20 active:bg-amber-600/40"
+                      className="w-full rounded-lg border border-amber-500/40 bg-amber-600/20 py-2.5 text-sm font-semibold text-amber-300 transition hover:border-amber-500/60 hover:bg-amber-600/30 focus:outline-none focus:ring-2 focus:ring-amber-500/20 active:bg-amber-600/40"
                     >
                       {editingBillId || editingRecurringBillId
                         ? "Save Bill"
                         : labels.addBill}
                     </button>
+                    <button
+                      type="button"
+                      onClick={closeBillForm}
+                      className="w-full rounded-lg border border-white/10 bg-white/5 py-2 text-xs font-medium text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                    >
+                      Cancel
+                    </button>
                   </form>
+                  )}
 
-                  <div className="border-t border-white/10 pt-6">
-                    <h4 className="mb-3 text-sm font-semibold text-amber-300">
-                      Upcoming Bills
-                    </h4>
-                    {plannedBills.length > 0 ? (
-                      <div className="space-y-4">
-                        <ul className="space-y-2">
-                          {plannedBills.map((bill) => (
-                            <li
-                              key={bill.id}
-                              className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <p className="font-medium text-white">{bill.name}</p>
-                                <p className="text-xs text-slate-500">
-                                  One-time · {formatDueDate(bill.dueDate)}
-                                </p>
-                              </div>
-                              <span className="font-semibold tabular-nums text-amber-200">
-                                ${bill.amount}
-                              </span>
-                              <div className="flex shrink-0 gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => startEditBill(bill)}
-                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-amber-500/40 hover:text-amber-300"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => removeBill(bill.id)}
-                                  className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
-                                  aria-label={`Remove ${bill.name}`}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </li>
-                          ))}
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOneTimeBillsSectionExpanded((prev) => !prev)
+                      }
+                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-sm font-semibold text-amber-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                      aria-expanded={oneTimeBillsSectionExpanded}
+                    >
+                      <span>One-Time Bills</span>
+                      <span className="text-xs text-slate-400">
+                        {oneTimeBillsSectionExpanded ? "▲" : "▼"}
+                      </span>
+                    </button>
+                    {oneTimeBillsSectionExpanded ? (
+                      upcomingPlannedBills.length > 0 ? (
+                        <ul className="mt-1 space-y-1">
+                          {upcomingPlannedBills.map((bill) => {
+                            const menuId = `one-time:${bill.id}`;
+                            return (
+                              <li
+                                key={bill.id}
+                                className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm leading-tight"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="min-w-0 flex-1 truncate font-medium text-white">
+                                    {bill.name}
+                                  </p>
+                                  <span className="shrink-0 font-semibold tabular-nums text-amber-200">
+                                    ${bill.amount}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="text-xs text-slate-500">
+                                    Due {formatDueDate(bill.dueDate)}
+                                  </p>
+                                  <div className="relative shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setBillActionMenuId(
+                                          billActionMenuId === menuId
+                                            ? null
+                                            : menuId,
+                                        );
+                                      }}
+                                      aria-label={`Actions for ${bill.name}`}
+                                      aria-expanded={billActionMenuId === menuId}
+                                      className={`${TOUCH_TARGET_BUTTON_CLASS} inline-flex min-h-[36px] min-w-[36px] items-center justify-center border-0 bg-transparent px-2 text-base leading-none text-slate-400 transition hover:bg-white/5 hover:text-white`}
+                                    >
+                                      ⋮
+                                    </button>
+                                    {billActionMenuId === menuId ? (
+                                      <div
+                                        className="absolute right-0 z-20 mt-1 min-w-[9.5rem] overflow-hidden rounded-lg border border-white/10 bg-slate-900 py-1 shadow-xl"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            markPlannedBillAsPaid(bill);
+                                            setBillActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-teal-200 transition hover:bg-white/10"
+                                        >
+                                          Mark as Paid
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            startEditBill(bill);
+                                            setBillActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/10"
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            removeBill(bill.id);
+                                            setBillActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-red-300 transition hover:bg-white/10"
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </li>
+                            );
+                          })}
                         </ul>
-
-                        <div className="flex items-center justify-between gap-4 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm">
-                          <span className="font-medium text-amber-300">
-                            Total Upcoming Bills
-                          </span>
-                          <span className="text-lg font-bold tabular-nums text-white">
-                            ${totalUpcomingBills}
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
-                        No one-time bills yet. Add rent, utilities, or other
-                        upcoming due dates above.
-                      </p>
-                    )}
+                      ) : (
+                        <p className="mt-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
+                          No one-time bills yet.
+                        </p>
+                      )
+                    ) : null}
                   </div>
 
-                  <div className="border-t border-white/10 pt-6">
-                    <h4 className="mb-3 text-sm font-semibold text-rose-300">
-                      Active Recurring Bills
-                    </h4>
-                    {recurringBills.length > 0 ? (
-                      <div className="space-y-4">
-                        <ul className="space-y-2">
-                          {recurringBills.map((bill) => (
-                            <li
-                              key={bill.id}
-                              className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <p className="font-medium text-white">{bill.name}</p>
-                                <p className="text-xs text-slate-500">
-                                  {bill.frequency} · {formatRecurringDueDay(bill)}
-                                </p>
-                              </div>
-                              <span className="font-semibold tabular-nums text-rose-200">
-                                ${bill.amount}
-                              </span>
-                              <div className="flex shrink-0 gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => startEditRecurringBill(bill)}
-                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-rose-500/40 hover:text-rose-300"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => removeRecurringBill(bill.id)}
-                                  className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
-                                  aria-label={`Remove ${bill.name}`}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRecurringBillsSectionExpanded((prev) => !prev)
+                      }
+                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-sm font-semibold text-rose-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                      aria-expanded={recurringBillsSectionExpanded}
+                    >
+                      <span>Recurring Bills</span>
+                      <span className="text-xs text-slate-400">
+                        {recurringBillsSectionExpanded ? "▲" : "▼"}
+                      </span>
+                    </button>
+                    {recurringBillsSectionExpanded ? (
+                      sortedRecurringBills.length > 0 ? (
+                        <ul className="mt-1 space-y-1">
+                          {sortedRecurringBills.map((bill) => {
+                            const upcomingOccurrences =
+                              getUpcomingRecurringBillOccurrences(
+                                bill,
+                                billsOccurrenceStart,
+                                billsOccurrenceHorizonEnd,
+                                completedTimelineEvents,
+                              );
+                            const nextDueDate = upcomingOccurrences[0] ?? null;
+                            const menuId = `recurring:${bill.id}`;
+                            const showDatesPanel =
+                              recurringBillDatesPanelId === bill.id;
 
-                        <div className="flex items-center justify-between gap-4 rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm">
-                          <span className="font-medium text-rose-300">
-                            Total Monthly Bills
-                          </span>
-                          <span className="text-lg font-bold tabular-nums text-white">
-                            ${Math.round(totalMonthlyRecurringBills * 100) / 100}
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
-                        No recurring bills yet. Add subscriptions, rent, or
-                        other monthly expenses above.
-                      </p>
-                    )}
+                            return (
+                              <li
+                                key={bill.id}
+                                className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm leading-tight"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="min-w-0 flex-1 truncate font-medium text-white">
+                                    {bill.name}
+                                  </p>
+                                  <span className="shrink-0 font-semibold tabular-nums text-rose-200">
+                                    ${bill.amount}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="text-xs text-slate-500">
+                                    {nextDueDate
+                                      ? `${formatDueDate(nextDueDate)} • ${bill.frequency}`
+                                      : bill.frequency}
+                                  </p>
+                                  <div className="relative shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setBillActionMenuId(
+                                          billActionMenuId === menuId
+                                            ? null
+                                            : menuId,
+                                        );
+                                      }}
+                                      aria-label={`Actions for ${bill.name}`}
+                                      aria-expanded={billActionMenuId === menuId}
+                                      className={`${TOUCH_TARGET_BUTTON_CLASS} inline-flex min-h-[36px] min-w-[36px] items-center justify-center border-0 bg-transparent px-2 text-base leading-none text-slate-400 transition hover:bg-white/5 hover:text-white`}
+                                    >
+                                      ⋮
+                                    </button>
+                                    {billActionMenuId === menuId ? (
+                                      <div
+                                        className="absolute right-0 z-20 mt-1 min-w-[9.5rem] overflow-hidden rounded-lg border border-white/10 bg-slate-900 py-1 shadow-xl"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        {nextDueDate ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              markRecurringBillOccurrenceAsPaid(
+                                                bill,
+                                                nextDueDate,
+                                              );
+                                              setBillActionMenuId(null);
+                                            }}
+                                            className="block w-full px-3 py-2 text-left text-xs text-teal-200 transition hover:bg-white/10"
+                                          >
+                                            Mark as Paid
+                                          </button>
+                                        ) : null}
+                                        {upcomingOccurrences.length > 0 ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              toggleRecurringBillDatesPanel(
+                                                bill.id,
+                                              );
+                                              setBillActionMenuId(null);
+                                            }}
+                                            className="block w-full px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/10"
+                                          >
+                                            {showDatesPanel
+                                              ? "Hide Schedule"
+                                              : "View Schedule"}
+                                          </button>
+                                        ) : null}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            startEditRecurringBill(bill);
+                                            setBillActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/10"
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            removeRecurringBill(bill.id);
+                                            setBillActionMenuId(null);
+                                            if (recurringBillDatesPanelId === bill.id) {
+                                              setRecurringBillDatesPanelId(null);
+                                            }
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-red-300 transition hover:bg-white/10"
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                {showDatesPanel && upcomingOccurrences.length > 0 ? (
+                                  <div className="mt-2 border-t border-white/10 pt-2">
+                                    <p className="text-xs font-medium text-slate-500">
+                                      Schedule
+                                    </p>
+                                    <ul className="mt-1 space-y-1">
+                                      {upcomingOccurrences.map((occurrenceDate) => (
+                                        <li
+                                          key={`${bill.id}-${occurrenceDate}`}
+                                          className="flex items-center justify-between gap-2 text-xs"
+                                        >
+                                          <span className="text-slate-300">
+                                            {formatDueDate(occurrenceDate)}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              markRecurringBillOccurrenceAsPaid(
+                                                bill,
+                                                occurrenceDate,
+                                              )
+                                            }
+                                            className={`${TOUCH_TARGET_BUTTON_CLASS} border-teal-500/30 bg-teal-500/10 font-semibold text-teal-200 transition hover:border-teal-500/50`}
+                                          >
+                                            Mark as Paid
+                                          </button>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                ) : null}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <p className="mt-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
+                          No recurring bills yet.
+                        </p>
+                      )
+                    ) : null}
                   </div>
                 </div>
               </CollapsibleSection>
@@ -5150,7 +6045,7 @@ export default function Home() {
               <CollapsibleSection
                 id="paychecks"
                 title={labels.paychecks}
-                subtitle="Add manual or recurring paychecks — amounts can vary"
+                subtitle="Track your income and upcoming paychecks."
                 iconClassName="bg-emerald-600/20 text-emerald-400"
                 isOpen={sectionOpen.paychecks}
                 onToggle={() => toggleSection("paychecks")}
@@ -5172,291 +6067,484 @@ export default function Home() {
                   </svg>
                 }
               >
-                <div className="space-y-6">
-                  <p className="text-sm leading-relaxed text-slate-400">
-                    Paychecks power your timeline and Safe To Spend. Recurring
-                    paychecks automatically generate future income events.
-                  </p>
-                  <form
-                    className="space-y-4"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      savePaycheck();
-                    }}
-                  >
-                    <fieldset>
-                      <legend className="mb-2 block text-sm font-medium text-slate-300">
-                        Paycheck Type
-                      </legend>
-                      <div className="flex flex-wrap gap-4">
-                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
-                          <input
-                            type="radio"
-                            name="paycheck-type"
-                            checked={paycheckFormType === "manual"}
-                            onChange={() =>
-                              handlePaycheckFormTypeChange("manual")
-                            }
-                            className="h-4 w-4 border-white/20 bg-white/5 text-emerald-500 focus:ring-emerald-500/30"
-                          />
-                          Manual Paycheck
-                        </label>
-                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
-                          <input
-                            type="radio"
-                            name="paycheck-type"
-                            checked={paycheckFormType === "recurring"}
-                            onChange={() =>
-                              handlePaycheckFormTypeChange("recurring")
-                            }
-                            className="h-4 w-4 border-white/20 bg-white/5 text-emerald-500 focus:ring-emerald-500/30"
-                          />
-                          Recurring Paycheck
-                        </label>
-                      </div>
-                    </fieldset>
+                <div className="space-y-2">
+                  {!paycheckFormExpanded ? (
+                    <button
+                      type="button"
+                      onClick={() => setPaycheckFormExpanded(true)}
+                      className="flex w-full items-center justify-center rounded-lg border border-dashed border-emerald-500/30 bg-emerald-500/5 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:border-emerald-500/50 hover:bg-emerald-500/10 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                    >
+                      + Add Paycheck
+                    </button>
+                  ) : (
+                    <form
+                      className="space-y-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 transition-all duration-200 sm:p-4"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        savePaycheck();
+                      }}
+                    >
+                      <fieldset>
+                        <legend className="mb-2 block text-sm font-medium text-slate-300">
+                          Paycheck Type
+                        </legend>
+                        <div className="flex flex-wrap gap-4">
+                          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
+                            <input
+                              type="radio"
+                              name="paycheck-type"
+                              checked={paycheckFormType === "manual"}
+                              onChange={() =>
+                                handlePaycheckFormTypeChange("manual")
+                              }
+                              className="h-4 w-4 border-white/20 bg-white/5 text-emerald-500 focus:ring-emerald-500/30"
+                            />
+                            Manual Paycheck
+                          </label>
+                          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
+                            <input
+                              type="radio"
+                              name="paycheck-type"
+                              checked={paycheckFormType === "recurring"}
+                              onChange={() =>
+                                handlePaycheckFormTypeChange("recurring")
+                              }
+                              className="h-4 w-4 border-white/20 bg-white/5 text-emerald-500 focus:ring-emerald-500/30"
+                            />
+                            Recurring Paycheck
+                          </label>
+                        </div>
+                      </fieldset>
 
-                    <div>
-                      <label
-                        htmlFor="paycheck-name"
-                        className="mb-2 block text-sm font-medium text-slate-300"
-                      >
-                        Paycheck Name
-                      </label>
-                      <input
-                        id="paycheck-name"
-                        type="text"
-                        placeholder="Example: Week 1 Pay"
-                        value={paycheckName}
-                        onChange={(e) => setPaycheckName(e.target.value)}
-                        className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-                      />
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor="paycheck-amount"
-                        className="mb-2 block text-sm font-medium text-slate-300"
-                      >
-                        Amount
-                      </label>
-                      <div className="relative">
-                        <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4 text-slate-500">
-                          $
-                        </span>
-                        <input
-                          id="paycheck-amount"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          placeholder="0.00"
-                          value={paycheckAmount}
-                          onChange={(e) => setPaycheckAmount(e.target.value)}
-                          className="block w-full rounded-xl border border-white/10 bg-white/5 py-3.5 pl-9 pr-4 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-                        />
-                      </div>
-                    </div>
-
-                    {paycheckFormType === "manual" ? (
                       <div>
                         <label
-                          htmlFor="paycheck-date"
+                          htmlFor="paycheck-name"
                           className="mb-2 block text-sm font-medium text-slate-300"
                         >
-                          Pay Date
+                          Paycheck Name
                         </label>
                         <input
-                          id="paycheck-date"
-                          type="date"
-                          value={paycheckDate}
-                          onChange={(e) => setPaycheckDate(e.target.value)}
-                          className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20 [color-scheme:dark]"
+                          id="paycheck-name"
+                          type="text"
+                          placeholder="Example: Week 1 Pay"
+                          value={paycheckName}
+                          onChange={(e) => setPaycheckName(e.target.value)}
+                          className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
                         />
                       </div>
-                    ) : (
-                      <>
-                        <div>
-                          <label
-                            htmlFor="recurring-paycheck-frequency"
-                            className="mb-2 block text-sm font-medium text-slate-300"
-                          >
-                            Frequency
-                          </label>
-                          <select
-                            id="recurring-paycheck-frequency"
-                            value={recurringPaycheckFrequency}
-                            onChange={(e) =>
-                              setRecurringPaycheckFrequency(
-                                e.target.value as RecurringFrequency,
-                              )
-                            }
-                            className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-                          >
-                            <option value="Weekly">Weekly</option>
-                            <option value="Biweekly">Biweekly</option>
-                            <option value="Monthly">Monthly</option>
-                          </select>
-                        </div>
 
+                      <div>
+                        <label
+                          htmlFor="paycheck-amount"
+                          className="mb-2 block text-sm font-medium text-slate-300"
+                        >
+                          Amount
+                        </label>
+                        <div className="relative">
+                          <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4 text-slate-500">
+                            $
+                          </span>
+                          <input
+                            id="paycheck-amount"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            placeholder="0.00"
+                            value={paycheckAmount}
+                            onChange={(e) => setPaycheckAmount(e.target.value)}
+                            className="block w-full rounded-xl border border-white/10 bg-white/5 py-3.5 pl-9 pr-4 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                          />
+                        </div>
+                      </div>
+
+                      {paycheckFormType === "manual" ? (
                         <div>
                           <label
-                            htmlFor="recurring-paycheck-first-date"
+                            htmlFor="paycheck-date"
                             className="mb-2 block text-sm font-medium text-slate-300"
                           >
-                            First Pay Date
+                            Pay Date
                           </label>
                           <input
-                            id="recurring-paycheck-first-date"
+                            id="paycheck-date"
                             type="date"
-                            value={recurringPaycheckFirstPayDate}
-                            onChange={(e) =>
-                              setRecurringPaycheckFirstPayDate(e.target.value)
-                            }
+                            value={paycheckDate}
+                            onChange={(e) => setPaycheckDate(e.target.value)}
                             className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20 [color-scheme:dark]"
                           />
                         </div>
+                      ) : (
+                        <>
+                          <div>
+                            <label
+                              htmlFor="recurring-paycheck-frequency"
+                              className="mb-2 block text-sm font-medium text-slate-300"
+                            >
+                              Frequency
+                            </label>
+                            <select
+                              id="recurring-paycheck-frequency"
+                              value={recurringPaycheckFrequency}
+                              onChange={(e) =>
+                                setRecurringPaycheckFrequency(
+                                  e.target.value as RecurringFrequency,
+                                )
+                              }
+                              className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                            >
+                              <option value="Weekly">Weekly</option>
+                              <option value="Biweekly">Biweekly</option>
+                              <option value="Monthly">Monthly</option>
+                            </select>
+                          </div>
 
-                        <div>
-                          <label
-                            htmlFor="recurring-paycheck-future-count"
-                            className="mb-2 block text-sm font-medium text-slate-300"
-                          >
-                            Number of Future Paychecks to Generate
-                          </label>
-                          <input
-                            id="recurring-paycheck-future-count"
-                            type="number"
-                            min="1"
-                            step="1"
-                            placeholder="6"
-                            value={recurringPaycheckFutureCount}
-                            onChange={(e) =>
-                              setRecurringPaycheckFutureCount(e.target.value)
-                            }
-                            className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-                          />
-                        </div>
-                      </>
-                    )}
+                          <div>
+                            <label
+                              htmlFor="recurring-paycheck-first-date"
+                              className="mb-2 block text-sm font-medium text-slate-300"
+                            >
+                              First Pay Date
+                            </label>
+                            <input
+                              id="recurring-paycheck-first-date"
+                              type="date"
+                              value={recurringPaycheckFirstPayDate}
+                              onChange={(e) =>
+                                setRecurringPaycheckFirstPayDate(e.target.value)
+                              }
+                              className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20 [color-scheme:dark]"
+                            />
+                          </div>
 
-                    <button
-                      type="submit"
-                      className="w-full rounded-xl border border-emerald-500/40 bg-emerald-600/20 py-3.5 text-sm font-semibold text-emerald-300 transition hover:border-emerald-500/60 hover:bg-emerald-600/30 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 active:bg-emerald-600/40"
-                    >
-                      {paycheckFormType === "manual"
-                        ? editingPaycheckId
+                          <div>
+                            <label
+                              htmlFor="recurring-paycheck-future-count"
+                              className="mb-2 block text-sm font-medium text-slate-300"
+                            >
+                              Number of Future Paychecks to Generate
+                            </label>
+                            <input
+                              id="recurring-paycheck-future-count"
+                              type="number"
+                              min="1"
+                              step="1"
+                              placeholder="6"
+                              value={recurringPaycheckFutureCount}
+                              onChange={(e) =>
+                                setRecurringPaycheckFutureCount(e.target.value)
+                              }
+                              className="block w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-slate-600 transition focus:border-emerald-500/50 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      <button
+                        type="submit"
+                        className="w-full rounded-lg border border-emerald-500/40 bg-emerald-600/20 py-2.5 text-sm font-semibold text-emerald-300 transition hover:border-emerald-500/60 hover:bg-emerald-600/30 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 active:bg-emerald-600/40"
+                      >
+                        {editingPaycheckId || editingRecurringPaycheckId
                           ? "Save Paycheck"
-                          : labels.addPaycheck
-                        : editingRecurringPaycheckId
-                          ? "Save Recurring Paycheck"
-                          : "Add Recurring Paycheck"}
-                    </button>
-                  </form>
+                          : labels.addPaycheck}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={closePaycheckForm}
+                        className="w-full rounded-lg border border-white/10 bg-white/5 py-2 text-xs font-medium text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                      >
+                        Cancel
+                      </button>
+                    </form>
+                  )}
 
                   <div>
-                    <h3 className="mb-3 text-sm font-semibold text-slate-300">
-                      Upcoming Paychecks
-                    </h3>
-                    {plannedPaychecks.length > 0 ? (
-                      <ul className="space-y-2">
-                        {[...plannedPaychecks]
-                          .sort((a, b) => a.payDate.localeCompare(b.payDate))
-                          .map((paycheck) => (
-                            <li
-                              key={paycheck.id}
-                              className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <p className="font-medium text-white">
-                                  {paycheck.name}
-                                </p>
-                                <p className="text-xs text-slate-500">
-                                  {formatDueDate(paycheck.payDate)}
-                                </p>
-                              </div>
-                              <span className="font-semibold tabular-nums text-emerald-200">
-                                ${paycheck.amount}
-                              </span>
-                              <div className="flex shrink-0 gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => startEditPaycheck(paycheck)}
-                                  className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-emerald-500/40 hover:text-emerald-300"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => removePaycheck(paycheck.id)}
-                                  className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
-                                  aria-label={`Remove ${paycheck.name}`}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </li>
-                          ))}
-                      </ul>
-                    ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
-                        No upcoming paychecks yet. Add manual paychecks above
-                        or set up a recurring schedule.
-                      </p>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setManualPaychecksSectionExpanded((prev) => !prev)
+                      }
+                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-sm font-semibold text-emerald-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                      aria-expanded={manualPaychecksSectionExpanded}
+                    >
+                      <span>One-Time Paychecks</span>
+                      <span className="text-xs text-slate-400">
+                        {manualPaychecksSectionExpanded ? "▲" : "▼"}
+                      </span>
+                    </button>
+                    {manualPaychecksSectionExpanded ? (
+                      upcomingPlannedPaychecks.length > 0 ? (
+                        <ul className="mt-1 space-y-1">
+                          {upcomingPlannedPaychecks.map((paycheck) => {
+                            const menuId = `manual:${paycheck.id}`;
+                            return (
+                              <li
+                                key={paycheck.id}
+                                className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm leading-tight"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="min-w-0 flex-1 truncate font-medium text-white">
+                                    {paycheck.name}
+                                  </p>
+                                  <span className="shrink-0 font-semibold tabular-nums text-emerald-200">
+                                    ${paycheck.amount}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="text-xs text-slate-500">
+                                    {formatDueDate(paycheck.payDate)}
+                                  </p>
+                                  <div className="relative shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setPaycheckActionMenuId(
+                                          paycheckActionMenuId === menuId
+                                            ? null
+                                            : menuId,
+                                        );
+                                      }}
+                                      aria-label={`Actions for ${paycheck.name}`}
+                                      aria-expanded={
+                                        paycheckActionMenuId === menuId
+                                      }
+                                      className={`${TOUCH_TARGET_BUTTON_CLASS} inline-flex min-h-[36px] min-w-[36px] items-center justify-center border-0 bg-transparent px-2 text-base leading-none text-slate-400 transition hover:bg-white/5 hover:text-white`}
+                                    >
+                                      ⋮
+                                    </button>
+                                    {paycheckActionMenuId === menuId ? (
+                                      <div
+                                        className="absolute right-0 z-20 mt-1 min-w-[9.5rem] overflow-hidden rounded-lg border border-white/10 bg-slate-900 py-1 shadow-xl"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            markPlannedPaycheckAsReceived(
+                                              paycheck,
+                                            );
+                                            setPaycheckActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-teal-200 transition hover:bg-white/10"
+                                        >
+                                          Mark as Received
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            startEditPaycheck(paycheck);
+                                            setPaycheckActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/10"
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            removePaycheck(paycheck.id);
+                                            setPaycheckActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-red-300 transition hover:bg-white/10"
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <p className="mt-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
+                          No manual paychecks yet.
+                        </p>
+                      )
+                    ) : null}
                   </div>
 
                   <div>
-                    <h3 className="mb-3 text-sm font-semibold text-slate-300">
-                      Active Recurring Paychecks
-                    </h3>
-                    {recurringPaychecks.length > 0 ? (
-                      <ul className="space-y-2">
-                        {recurringPaychecks.map((paycheck) => (
-                          <li
-                            key={paycheck.id}
-                            className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <p className="font-medium text-white">
-                                {paycheck.name}
-                              </p>
-                              <p className="text-xs text-slate-500">
-                                {formatRecurringPaycheckSchedule(paycheck)}
-                              </p>
-                            </div>
-                            <span className="font-semibold tabular-nums text-emerald-200">
-                              ${paycheck.amount}
-                            </span>
-                            <div className="flex shrink-0 gap-2">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  startEditRecurringPaycheck(paycheck)
-                                }
-                                className="rounded-lg border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-emerald-500/40 hover:text-emerald-300"
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRecurringPaychecksSectionExpanded((prev) => !prev)
+                      }
+                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-sm font-semibold text-teal-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                      aria-expanded={recurringPaychecksSectionExpanded}
+                    >
+                      <span>Recurring Paychecks</span>
+                      <span className="text-xs text-slate-400">
+                        {recurringPaychecksSectionExpanded ? "▲" : "▼"}
+                      </span>
+                    </button>
+                    {recurringPaychecksSectionExpanded ? (
+                      sortedRecurringPaychecks.length > 0 ? (
+                        <ul className="mt-1 space-y-1">
+                          {sortedRecurringPaychecks.map((paycheck) => {
+                            const upcomingOccurrences =
+                              getUpcomingRecurringPaycheckOccurrences(
+                                paycheck,
+                                billsOccurrenceStart,
+                                paycheckOccurrenceHorizonEnd,
+                                completedTimelineEvents,
+                              );
+                            const nextPayDate = upcomingOccurrences[0] ?? null;
+                            const menuId = `recurring:${paycheck.id}`;
+                            const showSchedulePanel =
+                              recurringPaycheckSchedulePanelId === paycheck.id;
+
+                            return (
+                              <li
+                                key={paycheck.id}
+                                className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm leading-tight"
                               >
-                                Edit
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  removeRecurringPaycheck(paycheck.id)
-                                }
-                                className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 text-slate-400 transition hover:border-red-500/40 hover:text-red-300`}
-                                aria-label={`Remove ${paycheck.name}`}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
-                        No recurring paychecks yet. Add a biweekly or monthly
-                        schedule above.
-                      </p>
-                    )}
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="min-w-0 flex-1 truncate font-medium text-white">
+                                    {paycheck.name}
+                                  </p>
+                                  <span className="shrink-0 font-semibold tabular-nums text-teal-200">
+                                    ${paycheck.amount}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="text-xs text-slate-500">
+                                    {nextPayDate
+                                      ? `${formatDueDate(nextPayDate)} • ${paycheck.frequency}`
+                                      : paycheck.frequency}
+                                  </p>
+                                  <div className="relative shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setPaycheckActionMenuId(
+                                          paycheckActionMenuId === menuId
+                                            ? null
+                                            : menuId,
+                                        );
+                                      }}
+                                      aria-label={`Actions for ${paycheck.name}`}
+                                      aria-expanded={
+                                        paycheckActionMenuId === menuId
+                                      }
+                                      className={`${TOUCH_TARGET_BUTTON_CLASS} inline-flex min-h-[36px] min-w-[36px] items-center justify-center border-0 bg-transparent px-2 text-base leading-none text-slate-400 transition hover:bg-white/5 hover:text-white`}
+                                    >
+                                      ⋮
+                                    </button>
+                                    {paycheckActionMenuId === menuId ? (
+                                      <div
+                                        className="absolute right-0 z-20 mt-1 min-w-[9.5rem] overflow-hidden rounded-lg border border-white/10 bg-slate-900 py-1 shadow-xl"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        {nextPayDate ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              markRecurringPaycheckOccurrenceAsReceived(
+                                                paycheck,
+                                                nextPayDate,
+                                              );
+                                              setPaycheckActionMenuId(null);
+                                            }}
+                                            className="block w-full px-3 py-2 text-left text-xs text-teal-200 transition hover:bg-white/10"
+                                          >
+                                            Mark as Received
+                                          </button>
+                                        ) : null}
+                                        {upcomingOccurrences.length > 0 ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              toggleRecurringPaycheckSchedulePanel(
+                                                paycheck.id,
+                                              );
+                                              setPaycheckActionMenuId(null);
+                                            }}
+                                            className="block w-full px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/10"
+                                          >
+                                            {showSchedulePanel
+                                              ? "Hide Schedule"
+                                              : "View Schedule"}
+                                          </button>
+                                        ) : null}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            startEditRecurringPaycheck(paycheck);
+                                            setPaycheckActionMenuId(null);
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/10"
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            removeRecurringPaycheck(paycheck.id);
+                                            setPaycheckActionMenuId(null);
+                                            if (
+                                              recurringPaycheckSchedulePanelId ===
+                                              paycheck.id
+                                            ) {
+                                              setRecurringPaycheckSchedulePanelId(
+                                                null,
+                                              );
+                                            }
+                                          }}
+                                          className="block w-full px-3 py-2 text-left text-xs text-red-300 transition hover:bg-white/10"
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                {showSchedulePanel &&
+                                upcomingOccurrences.length > 0 ? (
+                                  <div className="mt-2 border-t border-white/10 pt-2">
+                                    <p className="text-xs font-medium text-slate-500">
+                                      Schedule
+                                    </p>
+                                    <ul className="mt-1 space-y-1">
+                                      {upcomingOccurrences.map(
+                                        (occurrenceDate) => (
+                                          <li
+                                            key={`${paycheck.id}-${occurrenceDate}`}
+                                            className="flex items-center justify-between gap-2 text-xs"
+                                          >
+                                            <span className="text-slate-300">
+                                              {formatDueDate(occurrenceDate)}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                markRecurringPaycheckOccurrenceAsReceived(
+                                                  paycheck,
+                                                  occurrenceDate,
+                                                )
+                                              }
+                                              className={`${TOUCH_TARGET_BUTTON_CLASS} border-teal-500/30 bg-teal-500/10 font-semibold text-teal-200 transition hover:border-teal-500/50`}
+                                            >
+                                              Mark as Received
+                                            </button>
+                                          </li>
+                                        ),
+                                      )}
+                                    </ul>
+                                  </div>
+                                ) : null}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <p className="mt-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
+                          No recurring paychecks yet.
+                        </p>
+                      )
+                    ) : null}
                   </div>
                 </div>
               </CollapsibleSection>
@@ -6061,45 +7149,45 @@ export default function Home() {
                   </div>
                 </form>
 
-                {!cashFlowProjection ? (
+                {!timelineViewProjection ? (
                   <div className="mt-5 rounded-xl border border-teal-500/20 bg-teal-500/5 px-4 py-5 text-sm leading-relaxed text-slate-300">
                     Enter your checking balance or add bills and paychecks to
                     see your cash flow projection.
                   </div>
                 ) : null}
 
-                {cashFlowProjection && (
+                {timelineViewProjection && (
                   <div className="mt-5 space-y-4">
                     <dl className="grid gap-3 sm:grid-cols-3">
                       <div className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm">
                         <dt className="text-slate-400">Starting Balance</dt>
                         <dd className="mt-1 font-bold tabular-nums text-white">
-                          ${cashFlowProjection.startingBalance}
+                          ${timelineDisplayStartingBalance.toLocaleString()}
                         </dd>
                       </div>
                       <div className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm">
                         <dt className="text-slate-400">Lowest Projected Balance</dt>
                         <dd
                           className={`mt-1 font-bold tabular-nums ${
-                            cashFlowProjection.lowestBalanceBeforeNextPaycheck < 0
+                            timelineDisplayLowestBalance < 0
                               ? "text-red-300"
-                              : cashFlowProjection.lowestBalanceBeforeNextPaycheck <= 500
+                              : timelineDisplayLowestBalance <= 500
                                 ? "text-yellow-200"
                                 : "text-emerald-200"
                           }`}
                         >
-                          ${cashFlowProjection.lowestBalanceBeforeNextPaycheck}
+                          ${timelineDisplayLowestBalance.toLocaleString()}
                         </dd>
                       </div>
                       <div className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm">
                         <dt className="text-slate-400">Ending Projected Balance</dt>
                         <dd className="mt-1 font-bold tabular-nums text-white">
-                          ${cashFlowProjection.endingBalance}
+                          ${timelineDisplayEndingBalance.toLocaleString()}
                         </dd>
                       </div>
                     </dl>
 
-                    {unifiedTimelineEvents.length > 0 && (
+                    {timelineViewEvents.length > 0 && (
                       <>
                         <dl className="grid gap-3 sm:grid-cols-3">
                           <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm">
@@ -6159,7 +7247,7 @@ export default function Home() {
                             <div className="flex items-center justify-between gap-4">
                               <dt className="text-slate-400">Starting Balance</dt>
                               <dd className="font-semibold tabular-nums text-white">
-                                ${cashFlowProjection.startingBalance.toLocaleString()}
+                                ${timelineDisplayStartingBalance.toLocaleString()}
                               </dd>
                             </div>
                             <div className="flex items-center justify-between gap-4">
@@ -6195,8 +7283,30 @@ export default function Home() {
                       </>
                     )}
 
-                    {cashFlowProjection.rows.length > 0 && (
+                    {timelineViewEvents.length > 0 && (
                       <div className="space-y-3">
+                        <div>
+                          <p className="mb-2 text-sm font-medium text-slate-300">
+                            Timeline Range
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {timelineRangeOptions.map((option) => (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setTimelineRange(option.value)}
+                                className={`rounded-lg border px-3 py-2 text-xs font-semibold transition focus:outline-none focus:ring-2 focus:ring-teal-500/20 ${
+                                  timelineRange === option.value
+                                    ? "border-teal-500/40 bg-teal-600/20 text-teal-300"
+                                    : "border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/20 hover:text-slate-200"
+                                }`}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
@@ -6252,167 +7362,197 @@ export default function Home() {
                       </div>
                     )}
 
-                    {cashFlowProjection.rows.length > 0 ? (
+                    {timelineViewEvents.length > 0 ? (
                       <ul className="space-y-2">
                         {visibleTimelineRows.length > 0 ? (
-                          visibleTimelineRows.map(({ event, runningBalance }) => (
+                          groupedVisibleTimelineRows.map(({ date, rows }) => (
                             <li
-                              key={event.id}
-                              className={`rounded-lg border px-4 py-3 text-sm ${
-                                event.type === "Income"
-                                  ? "border-emerald-500/20 bg-emerald-500/5"
-                                  : "border-red-500/20 bg-red-500/5"
-                              }`}
+                              key={date}
+                              className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]"
                             >
-                              {editingTimelineEventId === event.id ? (
-                                <div className="space-y-3">
-                                  <div className="grid gap-3 sm:grid-cols-2">
-                                    <div className="sm:col-span-2">
-                                      <label className="mb-1 block text-xs font-medium text-slate-400">
-                                        Event Name
-                                      </label>
-                                      <input
-                                        type="text"
-                                        value={editTimelineName}
-                                        onChange={(e) =>
-                                          setEditTimelineName(e.target.value)
-                                        }
-                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
-                                      />
-                                    </div>
-                                    <div>
-                                      <label className="mb-1 block text-xs font-medium text-slate-400">
-                                        Amount
-                                      </label>
-                                      <input
-                                        type="number"
-                                        min="0"
-                                        step="0.01"
-                                        value={editTimelineAmount}
-                                        onChange={(e) =>
-                                          setEditTimelineAmount(e.target.value)
-                                        }
-                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
-                                      />
-                                    </div>
-                                    <div>
-                                      <label className="mb-1 block text-xs font-medium text-slate-400">
-                                        Date
-                                      </label>
-                                      <input
-                                        type="date"
-                                        value={editTimelineDate}
-                                        onChange={(e) =>
-                                          setEditTimelineDate(e.target.value)
-                                        }
-                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20 [color-scheme:dark]"
-                                      />
-                                    </div>
-                                    <div className="sm:col-span-2">
-                                      <label className="mb-1 block text-xs font-medium text-slate-400">
-                                        Event Type
-                                      </label>
-                                      <select
-                                        value={editTimelineType}
-                                        onChange={(e) =>
-                                          setEditTimelineType(
-                                            e.target.value as TimelineEventType,
-                                          )
-                                        }
-                                        className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
-                                      >
-                                        <option value="Income">Income</option>
-                                        <option value="Expense">Expense</option>
-                                      </select>
-                                    </div>
-                                  </div>
-                                  <div className="flex flex-wrap gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={saveEditTimelineEvent}
-                                      className="rounded-lg border border-teal-500/40 bg-teal-600/20 px-3 py-1.5 text-xs font-semibold text-teal-300 transition hover:bg-teal-600/30"
+                              <div className="border-b border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs font-semibold text-slate-400">
+                                {formatDueDate(date)}
+                              </div>
+                              <ul>
+                                {rows.map(({ event, runningBalance }) =>
+                                  editingTimelineEventId === event.id ? (
+                                    <li
+                                      key={event.id}
+                                      className="border-b border-white/5 px-3 py-3 last:border-b-0"
                                     >
-                                      Save
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={cancelEditTimelineEvent}
-                                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.07]"
-                                    >
-                                      Cancel
-                                    </button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[5rem_1fr_auto_auto_auto] lg:items-center lg:gap-3">
-                                  <span className="text-slate-400">
-                                    {formatDueDate(event.date)}
-                                  </span>
-                                  <span
-                                    className={`font-medium ${
-                                      event.type === "Income"
-                                        ? "text-emerald-100"
-                                        : "text-red-100"
-                                    }`}
-                                  >
-                                    {event.name}
-                                    {isPlannedPurchaseEvent(event.id) ? (
-                                      <span className="ml-2 text-xs font-normal text-slate-500">
-                                        Planned purchase
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                  <span
-                                    className={`font-semibold tabular-nums ${
-                                      event.type === "Income"
-                                        ? "text-emerald-300"
-                                        : "text-red-300"
-                                    }`}
-                                  >
-                                    {event.type === "Income" ? "+" : "-"}$
-                                    {event.amount}
-                                  </span>
-                                  <span className="font-semibold tabular-nums text-teal-200">
-                                    ${runningBalance}
-                                  </span>
-                                  <div className="flex flex-wrap gap-2 lg:justify-end">
-                                    <button
-                                      type="button"
-                                      onClick={() => completeTimelineEvent(event)}
-                                      aria-label={
+                                      <div className="space-y-3">
+                                        <div className="grid gap-3 sm:grid-cols-2">
+                                          <div className="sm:col-span-2">
+                                            <label className="mb-1 block text-xs font-medium text-slate-400">
+                                              Event Name
+                                            </label>
+                                            <input
+                                              type="text"
+                                              value={editTimelineName}
+                                              onChange={(e) =>
+                                                setEditTimelineName(e.target.value)
+                                              }
+                                              className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
+                                            />
+                                          </div>
+                                          <div>
+                                            <label className="mb-1 block text-xs font-medium text-slate-400">
+                                              Amount
+                                            </label>
+                                            <input
+                                              type="number"
+                                              min="0"
+                                              step="0.01"
+                                              value={editTimelineAmount}
+                                              onChange={(e) =>
+                                                setEditTimelineAmount(e.target.value)
+                                              }
+                                              className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
+                                            />
+                                          </div>
+                                          <div>
+                                            <label className="mb-1 block text-xs font-medium text-slate-400">
+                                              Date
+                                            </label>
+                                            <input
+                                              type="date"
+                                              value={editTimelineDate}
+                                              onChange={(e) =>
+                                                setEditTimelineDate(e.target.value)
+                                              }
+                                              className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20 [color-scheme:dark]"
+                                            />
+                                          </div>
+                                          <div className="sm:col-span-2">
+                                            <label className="mb-1 block text-xs font-medium text-slate-400">
+                                              Event Type
+                                            </label>
+                                            <select
+                                              value={editTimelineType}
+                                              onChange={(e) =>
+                                                setEditTimelineType(
+                                                  e.target.value as TimelineEventType,
+                                                )
+                                              }
+                                              className="block w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white focus:border-teal-500/50 focus:outline-none focus:ring-2 focus:ring-teal-500/20"
+                                            >
+                                              <option value="Income">Income</option>
+                                              <option value="Expense">Expense</option>
+                                            </select>
+                                          </div>
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={saveEditTimelineEvent}
+                                            className="rounded-lg border border-teal-500/40 bg-teal-600/20 px-3 py-1.5 text-xs font-semibold text-teal-300 transition hover:bg-teal-600/30"
+                                          >
+                                            Save
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={cancelEditTimelineEvent}
+                                            className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.07]"
+                                          >
+                                            Cancel
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </li>
+                                  ) : (
+                                    <li
+                                      key={event.id}
+                                      className={`grid grid-cols-[1fr_auto_auto_auto] items-center gap-2 border-b border-white/5 px-3 py-2 text-sm last:border-b-0 ${
                                         event.type === "Income"
-                                          ? `Mark ${event.name} as received`
-                                          : `Mark ${event.name} as paid`
-                                      }
-                                      className={`${TOUCH_TARGET_BUTTON_CLASS} font-semibold transition ${
-                                        event.type === "Income"
-                                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:border-emerald-500/50 hover:bg-emerald-500/20"
-                                          : "border-teal-500/30 bg-teal-500/10 text-teal-200 hover:border-teal-500/50 hover:bg-teal-500/20"
+                                          ? "bg-emerald-500/[0.03]"
+                                          : "bg-red-500/[0.03]"
                                       }`}
                                     >
-                                      {event.type === "Income"
-                                        ? "Mark as Received"
-                                        : "Mark as Paid"}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => startEditTimelineEvent(event)}
-                                      aria-label={`Edit ${event.name}`}
-                                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-teal-500/40 hover:bg-teal-500/10 hover:text-teal-200"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => deleteTimelineEvent(event)}
-                                      aria-label={`Delete ${event.name}`}
-                                      className={`${TOUCH_TARGET_BUTTON_CLASS} border-white/10 bg-white/5 font-semibold text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-200`}
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
+                                      <span
+                                        className={`min-w-0 truncate font-medium ${
+                                          event.type === "Income"
+                                            ? "text-emerald-100"
+                                            : "text-red-100"
+                                        }`}
+                                      >
+                                        {event.name}
+                                      </span>
+                                      <span
+                                        className={`shrink-0 font-semibold tabular-nums ${
+                                          event.type === "Income"
+                                            ? "text-emerald-300"
+                                            : "text-red-300"
+                                        }`}
+                                      >
+                                        {event.type === "Income" ? "+" : "-"}$
+                                        {event.amount}
+                                      </span>
+                                      <span className="shrink-0 font-semibold tabular-nums text-teal-200">
+                                        ${runningBalance}
+                                      </span>
+                                      <div className="relative shrink-0">
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setTimelineActionMenuId(
+                                              timelineActionMenuId === event.id
+                                                ? null
+                                                : event.id,
+                                            );
+                                          }}
+                                          aria-label={`Actions for ${event.name}`}
+                                          aria-expanded={
+                                            timelineActionMenuId === event.id
+                                          }
+                                          className="rounded border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 transition hover:border-white/20 hover:text-white"
+                                        >
+                                          ⋯ Actions
+                                        </button>
+                                        {timelineActionMenuId === event.id ? (
+                                          <div
+                                            className="absolute right-0 z-20 mt-1 min-w-[10rem] overflow-hidden rounded-lg border border-white/10 bg-slate-900 py-1 shadow-xl"
+                                            onClick={(e) => e.stopPropagation()}
+                                          >
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                startEditTimelineEvent(event);
+                                                setTimelineActionMenuId(null);
+                                              }}
+                                              className="block w-full px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/10"
+                                            >
+                                              Edit
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                completeTimelineEvent(event);
+                                                setTimelineActionMenuId(null);
+                                              }}
+                                              className="block w-full px-3 py-2 text-left text-xs text-teal-200 transition hover:bg-white/10"
+                                            >
+                                              {event.type === "Income"
+                                                ? "Mark as Received"
+                                                : "Mark as Paid"}
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                deleteTimelineEvent(event);
+                                                setTimelineActionMenuId(null);
+                                              }}
+                                              className="block w-full px-3 py-2 text-left text-xs text-red-300 transition hover:bg-white/10"
+                                            >
+                                              Delete
+                                            </button>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    </li>
+                                  ),
+                                )}
+                              </ul>
                             </li>
                           ))
                         ) : (
@@ -6429,56 +7569,69 @@ export default function Home() {
                     )}
 
                     {recentCompletedTimelineEvents.length > 0 ? (
-                      <div className="mt-6 border-t border-white/10 pt-5">
-                        <h4 className="text-sm font-semibold text-white">
-                          Recently Completed
-                        </h4>
-                        <ul className="mt-3 space-y-2">
-                          {recentCompletedTimelineEvents.map((event) => (
-                            <li
-                              key={event.id}
-                              className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-sm"
-                            >
-                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                <div>
-                                  <p className="font-medium text-slate-200">
-                                    {event.name}
-                                  </p>
-                                  <p className="mt-1 text-xs text-slate-500">
-                                    {event.type === "Income"
-                                      ? "Received"
-                                      : "Paid"}{" "}
-                                    {formatDueDate(event.completedDate)} · Due{" "}
-                                    {formatDueDate(event.originalDueDate)}
-                                  </p>
+                      <div className="mt-4 border-t border-white/10 pt-4">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRecentCompletedExpanded((prev) => !prev)
+                          }
+                          className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-2.5 text-left text-sm font-semibold text-white transition hover:border-white/20 hover:bg-white/[0.05]"
+                          aria-expanded={recentCompletedExpanded}
+                        >
+                          <span>
+                            Recently Completed ({completedTimelineEvents.length})
+                          </span>
+                          <span className="text-xs text-slate-400">
+                            {recentCompletedExpanded ? "▲ Collapse" : "▼ Expand"}
+                          </span>
+                        </button>
+                        {recentCompletedExpanded ? (
+                          <ul className="mt-2 space-y-1.5">
+                            {recentCompletedTimelineEvents.map((event) => (
+                              <li
+                                key={event.id}
+                                className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="truncate font-medium text-slate-200">
+                                      {event.name}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                      {event.type === "Income"
+                                        ? "Received"
+                                        : "Paid"}{" "}
+                                      {formatDueDate(event.completedDate)}
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={`shrink-0 font-semibold tabular-nums ${
+                                      event.type === "Income"
+                                        ? "text-emerald-300"
+                                        : "text-red-300"
+                                    }`}
+                                  >
+                                    {event.type === "Income" ? "+" : "-"}$
+                                    {event.amount.toLocaleString()}
+                                  </span>
                                 </div>
-                                <span
-                                  className={`font-semibold tabular-nums ${
-                                    event.type === "Income"
-                                      ? "text-emerald-300"
-                                      : "text-red-300"
-                                  }`}
-                                >
-                                  {event.type === "Income" ? "+" : "-"}$
-                                  {event.amount.toLocaleString()}
-                                </span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
                       </div>
                     ) : null}
 
                     <div
-                      className={`rounded-xl border px-5 py-4 backdrop-blur-sm ${cashFlowStatusStyles[cashFlowProjection.status].border} ${cashFlowStatusStyles[cashFlowProjection.status].bg}`}
+                      className={`rounded-xl border px-5 py-4 backdrop-blur-sm ${cashFlowStatusStyles[timelineViewProjection.status].border} ${cashFlowStatusStyles[timelineViewProjection.status].bg}`}
                     >
                       <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
                         Timeline Status
                       </p>
                       <span
-                        className={`mt-2 inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${cashFlowStatusStyles[cashFlowProjection.status].badge} ${cashFlowStatusStyles[cashFlowProjection.status].badgeText}`}
+                        className={`mt-2 inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${cashFlowStatusStyles[timelineViewProjection.status].badge} ${cashFlowStatusStyles[timelineViewProjection.status].badgeText}`}
                       >
-                        {cashFlowStatusStyles[cashFlowProjection.status].message}
+                        {cashFlowStatusStyles[timelineViewProjection.status].message}
                       </span>
                     </div>
                   </div>
@@ -7243,6 +8396,72 @@ export default function Home() {
           ))}
         </section>
       </main>
+
+      {timelineDeletePrompt ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 px-4 backdrop-blur-sm"
+          onClick={() => setTimelineDeletePrompt(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="timeline-delete-modal-title"
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-slate-900 p-6 shadow-2xl shadow-black/40"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2
+              id="timeline-delete-modal-title"
+              className="text-lg font-semibold text-white"
+            >
+              Delete recurring event?
+            </h2>
+            <p className="mt-3 text-sm leading-relaxed text-slate-400">
+              Delete only this occurrence or the entire recurring series?
+            </p>
+            <p className="mt-2 text-sm font-medium text-slate-300">
+              {timelineDeletePrompt.event.name} ·{" "}
+              {formatDueDate(timelineDeletePrompt.event.date)}
+            </p>
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => {
+                  executeTimelineDelete(
+                    timelineDeletePrompt.event,
+                    timelineDeletePrompt.source,
+                    "occurrence",
+                  );
+                  setTimelineDeletePrompt(null);
+                }}
+                className="flex-1 rounded-xl border border-white/10 bg-white/5 py-3 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.08]"
+              >
+                This occurrence only
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  executeTimelineDelete(
+                    timelineDeletePrompt.event,
+                    timelineDeletePrompt.source,
+                    "series",
+                  );
+                  setTimelineDeletePrompt(null);
+                }}
+                className="flex-1 rounded-xl border border-red-500/40 bg-red-600/20 py-3 text-sm font-semibold text-red-300 transition hover:border-red-500/60 hover:bg-red-600/30"
+              >
+                Entire series
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setTimelineDeletePrompt(null)}
+              className="mt-3 w-full rounded-xl border border-white/10 py-3 text-sm font-semibold text-slate-400 transition hover:bg-white/[0.05]"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {profileModal ? (
         <div
